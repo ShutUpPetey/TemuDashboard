@@ -1,5 +1,5 @@
 import React, { useRef } from "react";
-import { Download, Upload, LogIn, LogOut } from "lucide-react";
+import { Download, Upload, LogIn, LogOut, HelpCircle } from "lucide-react";
 
 /* Settings content shared by both shells.
    `dark` renders the desktop (dark sidebar-app) styling; the mobile
@@ -107,6 +107,11 @@ export default function SettingsPanel({ c, dark = true }) {
         <button onClick={c.exportItemsCsv} className={btn}><Download size={12} /> Items CSV</button>
         <button onClick={c.exportOrdersCsv} className={btn}><Download size={12} /> Orders CSV</button>
         <span className={`${label} text-[11px]`}>JSON = full backup · CSV = for Excel/Sheets</span>
+      </div>
+
+      <div className={row}>
+        <span className={`${label} text-xs uppercase tracking-wide`}>Help</span>
+        <button onClick={c.openWelcome} className={btn}><HelpCircle size={12} /> Show welcome tour</button>
       </div>
     </div>
   );
