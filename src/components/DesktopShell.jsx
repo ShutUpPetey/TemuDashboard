@@ -730,6 +730,11 @@ function UnmatchedStatusRow({ u, c }) {
     <div className="flex items-center gap-3 px-4 py-2 text-[13px] flex-wrap">
       <StatusChip s={u.kind} />
       <span className="mono font-semibold">{u.oid || "(no PO readable)"}</span>
+      {!u.oid && u.trackingNumber && (
+        <span className="mono text-[11px] text-stone-400" title="Tracking number found in the email, but it doesn't match any stored order yet — its 'shipped' email may not have synced.">
+          tracking {u.trackingNumber}
+        </span>
+      )}
       <span className="text-[11px] text-stone-400">{u.date || ""}</span>
       <span className="ml-auto flex items-center gap-2">
         {u.oid ? (

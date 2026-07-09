@@ -809,6 +809,8 @@ export default function App() {
           if (cancelRequestedRef.current) { pushLog("Sync cancelled — stopping before next email.", "warn"); break; }
           let oid = em.orderId;
           let html = null;
+          let tracking = null;
+          let matchedByTracking = false;
           // Fetch the body when the PO isn't in the subject (to find it), and
           // for shipped emails regardless — they carry the estimated-arrival
           // window and the carrier tracking link. Cheap regex, no Claude call.
@@ -819,6 +821,18 @@ export default function App() {
               // parent_order_sn in the tracking link is exact — the first-PO-
               // in-raw-HTML approach could grab a SIBLING order's number.
               if (!oid) oid = extractPoFromBody(html);
+              tracking = extractTracking(html);
+              // Some status emails never mention the PO anywhere at all — e.g.
+              // Temu's forwarded "UPS My Choice" delivery notifications
+              // (subject "Your package has been delivered", no PO in subject
+              // OR body). They DO carry the carrier tracking number as plain
+              // text, and that same number was already recorded on the order
+              // by its earlier "shipped" email (which does carry the PO) — so
+              // fall back to matching an existing order by tracking number.
+              if (!oid && tracking?.number) {
+                const byTracking = working.orders.find((o) => o.tracking?.number === tracking.number);
+                if (byTracking) { oid = byTracking.id; matchedByTracking = true; }
+              }
             } catch { /* skip */ }
           }
           const target = oid && working.orders.find((o) => o.id === oid);
@@ -827,7 +841,6 @@ export default function App() {
             if (html) {
               const eta = extractEta(html);
               if (eta) target.eta = eta;
-              const tracking = extractTracking(html);
               if (tracking) target.tracking = tracking;
               // Replace missing OR stale (pre-fix, wrong-anchor) links.
               if (!isOrderDetailLink(target.orderUrl)) {
@@ -835,7 +848,7 @@ export default function App() {
               }
             }
             statApplied++;
-            pushLog(`✓ ${oid} → ${em.kind}${em.kind === "shipped" && target.eta ? ` (est. ${target.eta})` : ""}${em.kind === "shipped" && target.tracking?.carrier ? ` · ${target.tracking.carrier}` : ""}`, "ok");
+            pushLog(`✓ ${oid} → ${em.kind}${matchedByTracking ? " (matched by tracking #, no PO in email)" : ""}${em.kind === "shipped" && target.eta ? ` (est. ${target.eta})` : ""}${em.kind === "shipped" && target.tracking?.carrier ? ` · ${target.tracking.carrier}` : ""}`, "ok");
             if (!working.processedIds.includes(em.id)) working.processedIds.push(em.id);
             setUnmatchedStatus((u) => u.filter((x) => x.id !== em.id && x.oid !== oid));
           } else {
@@ -845,8 +858,8 @@ export default function App() {
             // Recorded in unmatchedStatus so the Review queue can show it
             // and offer a targeted "find & import" of the missing order.
             statUnmatched++;
-            pushLog(`✗ ${em.kind} email has no matching order${oid ? ` (${oid})` : " (no PO found in it)"} — see Needs review.`, "warn");
-            setUnmatchedStatus((u) => (u.some((x) => x.id === em.id) ? u : [...u, { id: em.id, oid: oid || null, kind: em.kind, date: em.date }]));
+            pushLog(`✗ ${em.kind} email has no matching order${oid ? ` (${oid})` : tracking?.number ? ` (no PO, tracking ${tracking.number} matches no stored order)` : " (no PO found in it)"} — see Needs review.`, "warn");
+            setUnmatchedStatus((u) => (u.some((x) => x.id === em.id) ? u : [...u, { id: em.id, oid: oid || null, kind: em.kind, date: em.date, trackingNumber: tracking?.number || null }]));
           }
         }
         if (statApplied || statUnmatched) {

@@ -93,7 +93,20 @@ eventTime, eventDesc, checkedAt, trackerId?/easypostId? }`.
   `parent_order_sn=` in links (first-PO-in-HTML picks wrong siblings). Reconcile
   (wide) re-applies ALL status emails in history (cheap, idempotent,
   oldest-first). Unmatched ones are NOT marked processed; they go to
-  `unmatchedStatus` state → Review queue → "Find & import".
+  `unmatchedStatus` state → Review queue → "Find & import" (with a manual
+  PO-paste field when no PO could be read at all, and the Gmail link there
+  deep-links to the exact message via `#all/<messageId>`, not a search).
+- **PO-less status emails (tracking-number fallback)**: Temu's forwarded
+  "UPS My Choice" delivery notifications (subject literally "Your package
+  has been delivered") never mention the PO anywhere — subject or body —
+  only a carrier tracking number. Since the order's earlier "shipped" email
+  DOES carry both the PO and that same tracking number, the status-email
+  loop in `App.jsx` falls back to matching an existing order by
+  `tracking.number` when no PO can be extracted. Oldest-first ordering
+  means the shipped email (which sets `tracking.number`) is always applied
+  before its delivered follow-up. If still unmatched, the tracking number
+  (when found) is carried into `unmatchedStatus` as `trackingNumber` and
+  shown in the Review queue row for context.
 - **Order links**: the real Temu order page is the `cmsg_transit.html` /
   `_order_ticket=` link (`isOrderDetailLink`). Change-address links also contain
   the PO — that bug was fixed; stale stored links self-heal on click.

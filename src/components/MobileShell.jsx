@@ -322,6 +322,11 @@ function UnmatchedStatusRow({ u, c }) {
     <div className="flex items-center gap-2 px-4 py-2 text-[12.5px] flex-wrap">
       <StatusChip s={u.kind} />
       <span className="mono font-semibold truncate">{u.oid || "(no PO)"}</span>
+      {!u.oid && u.trackingNumber && (
+        <span className="mono text-[10.5px] text-stone-400 truncate" title="Tracking number found in the email, but it doesn't match any stored order yet.">
+          trk {u.trackingNumber}
+        </span>
+      )}
       <span className="ml-auto flex items-center gap-2">
         {u.oid ? (
           <button onClick={() => c.importMissingOrder(u.oid)} disabled={c.syncing}
