@@ -34,14 +34,18 @@ Open threads:
    but no readable sub-order IDs). NEXT STEP: user provides a raw snippet of
    such an email ("Show original" in Gmail, the "Order ID: PO-…" area) → fix the
    regex in `src/lib/gmail.js → extractSubOrders` → orders recover on Reconcile.
-2. **Whole-blob cloud sync clobber risk.** Sync state is one JSON blob with
-   newest-`updatedAt`-wins. A stale device making any save can overwrite newer
-   statuses. Carrier auto-promotion masks it for delivered orders. If the user
-   reports statuses flipping back, implement per-order merge.
-3. Dormant adapters: EasyPost (user's dashboard never showed API keys), direct
+2. Dormant adapters: EasyPost (user's dashboard never showed API keys), direct
    UPS (blocked: needs shipper account w/ scheduled pickups), direct USPS
    (blocked: registration issues), Ship24 (free quota burned), 17TRACK (needs
    business email). All still in `scripts/carrier-eta.mjs` as fall-throughs.
+3. **Cloud sync deletion resurrection (known, accepted limitation).** The
+   per-order merge (see Key Mechanisms) has no tombstones. If you delete an
+   order on one device before that deletion has synced to another device, and
+   the other device saves anything before pulling the deletion, the merge (a
+   union of both devices' order lists) can bring the deleted order back. Rare
+   in practice since deletion is a manual, deliberate action — not fixed
+   because it'd require a tombstone system that conflicts with the existing
+   "delete to force a clean Reconcile re-read" mechanism (see `hasOrder()`).
 
 ## Architecture
 
@@ -67,7 +71,7 @@ Libraries: `lib/gmail.js` (Gmail REST + all email extraction regexes),
 `lib/gis.js` (Google OAuth token client), `lib/firebase.js` (CDN-loaded RTDB
 sync, optional), `lib/storage.js` (IndexedDB with localStorage migration),
 `lib/discounts.js` (proportional discount distribution — the core feature),
-`lib/exportCsv.js`.
+`lib/syncMerge.js` (per-order cloud sync merge), `lib/exportCsv.js`.
 
 Worker: `scripts/carrier-eta.mjs` run by `.github/workflows/carrier-eta.yml`
 (cron every 6h + manual dispatch). Deploy: `.github/workflows/deploy.yml`.
@@ -77,7 +81,10 @@ Worker: `scripts/carrier-eta.mjs` run by `.github/workflows/carrier-eta.yml`
 Order: `{ id: "PO-211-…", messageId, date, status: ordered|shipped|delivered|
 cancelled|returned, subtotal, discount, shipping, tax, total, discountFactor,
 items[], images[], orderUrl, eta (email text), tracking: {carrier, number, url},
-manualEdit }`. Item: `{ name, listed, paid, qty, category, discountPct,
+manualEdit, updatedAt }` — `updatedAt` is a PER-ORDER timestamp (added whenever
+that order is mutated: status pass, fixEstimatedPrices, manual edit, carrier
+promotion) used ONLY for cloud sync merge (see Key Mechanisms); unrelated to
+the top-level state's `updatedAt`. Item: `{ name, listed, paid, qty, category, discountPct,
 estimated, listedUnknown, thumbUrl, thumbY }` — `estimated` means `paid` itself
 is a guess (multi-item split order, even-split fallback); `listedUnknown`
 means `paid` is exact but the pre-discount `listed` price was never shown
@@ -145,6 +152,26 @@ eventTime, eventDesc, checkedAt, trackerId?/easypostId? }`.
   (still priceless) split confirmation.
 - **Carrier → status promotion**: an effect in App.jsx auto-flips shipped →
   delivered when carrier data says Delivered.
+- **Per-order cloud sync merge (`lib/syncMerge.js`)**: cloud sync used to
+  treat the whole app state as one JSON blob with "newest top-level
+  `updatedAt` wins" — a stale device making ANY save (even an unrelated
+  status update, or the carrier auto-promote effect just running) could
+  clobber a fresher edit to a DIFFERENT order made on another device,
+  because its save's fresh top-level timestamp didn't reflect the edit it
+  didn't know about. Concretely: this is why a `fixEstimatedPrices` ("Try
+  real prices") fix on one device could vanish after a refresh on another.
+  Fixed by giving every ORDER its own `updatedAt`, stamped at every mutation
+  site (`saveEdit`, `updateItem`, the carrier-promote effect,
+  `processOrderEmail`'s two `applyDiscounts` calls, `fixEstimatedPrices`, and
+  the status-email pass in `sync()`). `connectCloud` (both the initial pull
+  and the live `cloudSubscribe` listener) now calls `mergeState()`, which
+  takes the UNION of both devices' order lists and keeps whichever copy of
+  EACH order is actually newer (`mergeOrders`) — no whole-side "wins."
+  `remoteIsStale()` decides whether to push the merged result back to
+  Firebase so both sides converge; `sameOrderSet()` is a cheap id+timestamp
+  fingerprint check the live listener uses to recognize its own echo (avoids
+  a save→notify→merge→save loop). `processedIds` merges as a plain union
+  (never lossy). Known gap: no tombstones for deletions — see Open threads.
 - **Two-tier price review (`estimated` vs `listedUnknown`)**: `applyDiscounts`'
   no-listed-price fallback (split-order confirmations with only a combined
   total) used to flag every resulting item `estimated`. Now it only does that

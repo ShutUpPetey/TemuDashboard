@@ -12,6 +12,7 @@ import {
   extractOrderLink, extractEta, isOrderDetailLink, extractPoFromBody, extractTracking,
 } from "./lib/gmail";
 import { buildStats, reviewQueue, inTransitOrders, isActiveStatus } from "./lib/derive";
+import { mergeState, remoteIsStale, sameOrderSet } from "./lib/syncMerge";
 import { CATEGORIES, fmt, numOrNull, annotateThumbs, Lightbox, THUMB_SIZE_KEY, THUMB_SIZE_DEFAULT } from "./components/shared";
 import { useLayoutMode } from "./hooks/useMediaQuery";
 import DesktopShell from "./components/DesktopShell";
@@ -117,29 +118,50 @@ export default function App() {
       await cloudSignIn(token);
       const remote = await cloudGet();
       const local = dataRef.current || {};
-      if (remote?.json && (remote.updatedAt || 0) > (local.updatedAt || 0)) {
+      if (remote?.json) {
+        // Per-order merge (see lib/syncMerge.js), NOT "newest blob wins" —
+        // a stale device's save could otherwise clobber a fresher edit
+        // made on another device to a completely different order (e.g. a
+        // "Try real prices" fix vanishing after refresh because some
+        // unrelated save on another device raced it with a newer top-
+        // level timestamp). Each order carries its own updatedAt, so the
+        // merge keeps whichever copy of EACH order is actually newer and
+        // takes the union of both order lists — nothing is lost.
         const parsed = JSON.parse(remote.json);
-        setData((d) => ({ ...d, ...parsed }));
-        storage.set(STORAGE_KEY, remote.json).catch(() => {});
-        pushLog(`Cloud: pulled newer data (${parsed.orders?.length ?? 0} orders) from Firebase.`, "ok");
-      } else if ((local.orders?.length || local.updatedAt) && (!remote || (local.updatedAt || 0) > (remote.updatedAt || 0))) {
+        const merged = mergeState(local, parsed);
+        setData(merged);
+        storage.set(STORAGE_KEY, JSON.stringify(merged)).catch(() => {});
+        if (remoteIsStale(merged.orders, parsed.orders)) {
+          // Remote was missing something local had, or had an older copy
+          // of some order — push the merged truth back so both sides
+          // converge instead of staying split.
+          await cloudSet(JSON.stringify(merged), merged.updatedAt).catch(() => {});
+        }
+        pushLog(`Cloud: merged with Firebase (${merged.orders.length} order(s) total).`, "ok");
+      } else if (local.orders?.length || local.updatedAt) {
         await cloudSet(JSON.stringify(local), local.updatedAt || Date.now());
         pushLog("Cloud: uploaded local data to Firebase.", "ok");
       }
       cloudUnsubRef.current = await cloudSubscribe((val) => {
         if (!val?.json) return;
-        if ((val.updatedAt || 0) <= (dataRef.current?.updatedAt || 0)) return; // our own write, or stale
         if (syncingRef.current) {
-          // A sync is writing from its own snapshot — applying a remote
-          // change now would be clobbered by the next loop save anyway.
-          pushLog("Cloud: remote change arrived mid-sync — this device's sync results will win.", "warn");
+          // A sync is writing from its own snapshot — merge on the next
+          // connect/subscribe tick instead of mid-sync, to avoid a
+          // half-applied merge racing the sync loop's own saves.
+          pushLog("Cloud: remote change arrived mid-sync — will merge once this sync finishes.", "warn");
           return;
         }
         try {
           const parsed = JSON.parse(val.json);
-          setData((d) => ({ ...d, ...parsed }));
-          storage.set(STORAGE_KEY, val.json).catch(() => {});
-          pushLog("Cloud: updated from another device.", "ok");
+          const localNow = dataRef.current || {};
+          const merged = mergeState(localNow, parsed);
+          if (sameOrderSet(merged.orders, localNow.orders || [])) return; // our own echo, or nothing new
+          setData(merged);
+          storage.set(STORAGE_KEY, JSON.stringify(merged)).catch(() => {});
+          if (remoteIsStale(merged.orders, parsed.orders)) {
+            cloudSet(JSON.stringify(merged), merged.updatedAt).catch(() => {});
+          }
+          pushLog("Cloud: merged updates from another device.", "ok");
         } catch { /* malformed remote payload — ignore */ }
       });
       // Live carrier ETAs (written by the scheduled GitHub Action) — read-only.
@@ -173,7 +195,7 @@ export default function App() {
     );
     if (!done.length) return;
     const ids = new Set(done.map((o) => o.id));
-    save({ ...data, orders: data.orders.map((o) => (ids.has(o.id) ? { ...o, status: "delivered" } : o)) });
+    save({ ...data, orders: data.orders.map((o) => (ids.has(o.id) ? { ...o, status: "delivered", updatedAt: Date.now() } : o)) });
     pushLog(`Carrier reported delivered — updated ${done.length} order(s): ${done.map((o) => o.id).join(", ")}`, "ok");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [carrier, loaded, syncing, data.orders]);
@@ -291,6 +313,7 @@ export default function App() {
       items,
       discountFactor: itemSum > 0 ? paidSum / itemSum : null,
       manualEdit: true,
+      updatedAt: Date.now(), // per-order timestamp for cloud merge (lib/syncMerge.js)
     };
     save({ ...data, orders: data.orders.map((o) => (o.id === cleaned.id ? cleaned : o)) });
     pushLog(`Saved manual edits to ${cleaned.id}.`, "ok");
@@ -318,7 +341,7 @@ export default function App() {
           estimated: false, // hand-reviewed
         };
       });
-      return { ...o, items, manualEdit: true };
+      return { ...o, items, manualEdit: true, updatedAt: Date.now() }; // per-order timestamp for cloud merge
     });
     save({ ...data, orders });
     pushLog(`Saved item edit in ${orderId}.`, "ok");
@@ -483,6 +506,7 @@ export default function App() {
             eta: extractEta(html),
             subtotal: null, discount: null, shipping: 0, tax: 0, total: sub.total,
             status: "ordered",
+            updatedAt: Date.now(), // per-order timestamp for cloud merge
             items: (parsed.items || []).map((it) => ({
               name: it.n, listed: it.listed, qty: it.qty || 1,
               category: CATEGORIES.includes(it.c) ? it.c : "Other",
@@ -541,6 +565,7 @@ export default function App() {
           subtotal: parsed.subtotal, discount: parsed.discount,
           shipping: parsed.shipping, tax: parsed.tax, total: parsed.total,
           status: "ordered",
+          updatedAt: Date.now(), // per-order timestamp for cloud merge
           items: (parsed.items || []).map((it) => ({
             name: it.n, listed: it.listed, qty: it.qty || 1,
             category: CATEGORIES.includes(it.c) ? it.c : "Other",
@@ -725,6 +750,7 @@ export default function App() {
         })),
         images: urls,
         manualEdit: true,
+        updatedAt: Date.now(), // per-order timestamp for cloud merge (lib/syncMerge.js)
       });
       await save({ ...data, orders: data.orders.map((o) => (o.id === orderId ? fixed : o)) });
       pushLog(`✓ ${orderId}: replaced estimated prices with real ones from its status email.`, "ok");
@@ -954,6 +980,7 @@ export default function App() {
                 target.orderUrl = extractOrderLink(html, target.id) || target.orderUrl;
               }
             }
+            target.updatedAt = Date.now(); // per-order timestamp for cloud merge (lib/syncMerge.js)
             statApplied++;
             pushLog(`✓ ${oid} → ${em.kind}${matchedByTracking ? " (matched by tracking #, no PO in email)" : ""}${em.kind === "shipped" && target.eta ? ` (est. ${target.eta})` : ""}${em.kind === "shipped" && target.tracking?.carrier ? ` · ${target.tracking.carrier}` : ""}`, "ok");
             if (!working.processedIds.includes(em.id)) working.processedIds.push(em.id);
