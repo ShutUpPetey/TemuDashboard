@@ -261,16 +261,7 @@ export default function MobileShell({ c }) {
               </div>
               <div className="divide-y divide-stone-100">
                 {c.unmatchedStatus.map((u) => (
-                  <div key={u.id} className="flex items-center gap-2 px-4 py-2 text-[12.5px]">
-                    <StatusChip s={u.kind} />
-                    <span className="mono font-semibold truncate">{u.oid || "(no PO)"}</span>
-                    {u.oid && (
-                      <button onClick={() => c.importMissingOrder(u.oid)} disabled={c.syncing}
-                        className="ml-auto text-xs font-bold text-blue-600 disabled:opacity-40">
-                        Find &amp; import
-                      </button>
-                    )}
-                  </div>
+                  <UnmatchedStatusRow key={u.id} u={u} c={c} />
                 ))}
               </div>
             </div>
@@ -313,6 +304,51 @@ export default function MobileShell({ c }) {
           ))}
         </div>
       </nav>
+    </div>
+  );
+}
+
+/* ================= Needs review: unmatched status email row ================= */
+
+/* Mirrors DesktopShell's UnmatchedStatusRow. The Gmail link deep-links to the
+   EXACT message (Gmail's #all/<messageId> permalink works for any hex message
+   id) instead of a keyword search, and when no PO could be read from the body
+   a manual-entry field lets the user paste the PO after reading the email
+   themselves, reusing the same find-&-import flow. */
+function UnmatchedStatusRow({ u, c }) {
+  const [manualPo, setManualPo] = useState("");
+  const gmailLink = `https://mail.google.com/mail/u/0/#all/${u.id}`;
+  return (
+    <div className="flex items-center gap-2 px-4 py-2 text-[12.5px] flex-wrap">
+      <StatusChip s={u.kind} />
+      <span className="mono font-semibold truncate">{u.oid || "(no PO)"}</span>
+      <span className="ml-auto flex items-center gap-2">
+        {u.oid ? (
+          <button onClick={() => c.importMissingOrder(u.oid)} disabled={c.syncing}
+            className="text-xs font-bold text-blue-600 disabled:opacity-40">
+            Find &amp; import
+          </button>
+        ) : (
+          <>
+            <input
+              value={manualPo}
+              onChange={(e) => setManualPo(e.target.value)}
+              placeholder="Paste PO…"
+              className="text-xs mono px-2 py-1 border border-stone-300 rounded-md w-28 focus:outline-none focus:border-blue-400"
+            />
+            <button
+              onClick={() => c.importMissingOrder(manualPo.trim())}
+              disabled={c.syncing || !manualPo.trim()}
+              className="text-xs font-bold text-blue-600 disabled:opacity-40 whitespace-nowrap">
+              Import
+            </button>
+          </>
+        )}
+        <a href={gmailLink} target="_blank" rel="noreferrer"
+          className="text-xs font-semibold text-stone-400 inline-flex items-center gap-0.5 whitespace-nowrap">
+          <ExternalLink size={10} />
+        </a>
+      </span>
     </div>
   );
 }

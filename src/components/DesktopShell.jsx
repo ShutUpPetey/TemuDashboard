@@ -655,24 +655,7 @@ function ReviewView({ c, goEditOrder }) {
           </div>
           <div className="divide-y divide-stone-100">
             {c.unmatchedStatus.map((u) => (
-              <div key={u.id} className="flex items-center gap-3 px-4 py-2 text-[13px]">
-                <StatusChip s={u.kind} />
-                <span className="mono font-semibold">{u.oid || "(no PO readable)"}</span>
-                <span className="text-[11px] text-stone-400">{u.date || ""}</span>
-                <span className="ml-auto flex items-center gap-3">
-                  {u.oid && (
-                    <button onClick={() => c.importMissingOrder(u.oid)} disabled={c.syncing}
-                      className="text-xs font-bold text-blue-600 hover:text-blue-500 disabled:opacity-40">
-                      Find &amp; import
-                    </button>
-                  )}
-                  <a href={`https://mail.google.com/mail/u/0/#search/${encodeURIComponent(u.oid || "from:transaction.temu.com")}`}
-                    target="_blank" rel="noreferrer"
-                    className="text-xs font-semibold text-stone-400 hover:text-stone-600 inline-flex items-center gap-0.5">
-                    Gmail <ExternalLink size={10} />
-                  </a>
-                </span>
-              </div>
+              <UnmatchedStatusRow key={u.id} u={u} c={c} />
             ))}
           </div>
         </div>
@@ -727,6 +710,54 @@ function ReviewView({ c, goEditOrder }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* One row of the "Status emails with no matching order" queue. The Gmail
+   link deep-links to the EXACT message (Gmail's #all/<messageId> permalink
+   works for any hex message id, regardless of label/folder) instead of a
+   keyword search — that way it opens right on the email in question rather
+   than a results list. When no PO could be read from the email body (oid is
+   null), there's no PO to hand importMissingOrder, so instead of hiding the
+   row with nothing actionable, offer a manual entry: open the email via the
+   link above, read the PO off it, paste it in, and re-use the same
+   find-&-import flow. */
+function UnmatchedStatusRow({ u, c }) {
+  const [manualPo, setManualPo] = useState("");
+  const gmailLink = `https://mail.google.com/mail/u/0/#all/${u.id}`;
+  return (
+    <div className="flex items-center gap-3 px-4 py-2 text-[13px] flex-wrap">
+      <StatusChip s={u.kind} />
+      <span className="mono font-semibold">{u.oid || "(no PO readable)"}</span>
+      <span className="text-[11px] text-stone-400">{u.date || ""}</span>
+      <span className="ml-auto flex items-center gap-2">
+        {u.oid ? (
+          <button onClick={() => c.importMissingOrder(u.oid)} disabled={c.syncing}
+            className="text-xs font-bold text-blue-600 hover:text-blue-500 disabled:opacity-40">
+            Find &amp; import
+          </button>
+        ) : (
+          <>
+            <input
+              value={manualPo}
+              onChange={(e) => setManualPo(e.target.value)}
+              placeholder="Paste PO from email…"
+              className="text-xs mono px-2 py-1 border border-stone-300 rounded-md w-40 focus:outline-none focus:border-blue-400"
+            />
+            <button
+              onClick={() => c.importMissingOrder(manualPo.trim())}
+              disabled={c.syncing || !manualPo.trim()}
+              className="text-xs font-bold text-blue-600 hover:text-blue-500 disabled:opacity-40 whitespace-nowrap">
+              Find &amp; import
+            </button>
+          </>
+        )}
+        <a href={gmailLink} target="_blank" rel="noreferrer"
+          className="text-xs font-semibold text-stone-400 hover:text-stone-600 inline-flex items-center gap-0.5 whitespace-nowrap">
+          Open email <ExternalLink size={10} />
+        </a>
+      </span>
     </div>
   );
 }
