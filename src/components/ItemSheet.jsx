@@ -118,11 +118,13 @@ export default function ItemSheet({ c, it, onClose, onViewOrder, desktop = false
                 </Row>
                 <Row k="Listed / paid">
                   <span className="mono">
-                    {!it.estimated && it.listed != null && <s className="text-stone-400 mr-1.5">{fmt(it.listed)}</s>}
+                    {!it.estimated && !it.listedUnknown && it.listed != null && <s className="text-stone-400 mr-1.5">{fmt(it.listed)}</s>}
                     <b>{fmt(it.paid)}</b>
                     {it.estimated
                       ? <span className="text-amber-600 font-semibold ml-1.5">≈ estimated</span>
-                      : it.discountPct > 0.005 && <span className="text-emerald-600 font-semibold ml-1.5">−{(it.discountPct * 100).toFixed(0)}%</span>}
+                      : it.listedUnknown
+                        ? <span className="text-stone-500 font-semibold ml-1.5" title="Paid amount is exact — the pre-discount list price wasn't shown.">🏷 list price unknown</span>
+                        : it.discountPct > 0.005 && <span className="text-emerald-600 font-semibold ml-1.5">−{(it.discountPct * 100).toFixed(0)}%</span>}
                   </span>
                 </Row>
                 <Row k="Category"><span className="mono">{it.category}</span></Row>
@@ -167,13 +169,13 @@ export default function ItemSheet({ c, it, onClose, onViewOrder, desktop = false
                 </button>
               </div>
               <button onClick={onClose} className="w-full mt-2 bg-stone-900 text-white rounded-xl py-2.5 text-sm font-bold">Done</button>
-              {it.estimated && (
+              {(it.estimated || it.listedUnknown) && (
                 <button
                   onClick={() => { if (!c.syncing) c.fixEstimatedPrices(it.orderId); }}
                   disabled={c.syncing}
-                  title="Re-reads a shipped/delivered email for this order, which carries the real priced receipt (split-order confirmations only have an even-split estimate). Costs one vision call."
+                  title="Re-reads a shipped/delivered email for this order, which carries the real priced receipt (split-order confirmations only have an even-split estimate, or are missing the pre-discount list price). Costs one vision call."
                   className="w-full mt-2 text-center text-[12px] font-semibold text-emerald-600 underline underline-offset-2 disabled:opacity-40">
-                  ≈ Estimated — try real prices from a status email
+                  {it.estimated ? "≈ Estimated — try real prices from a status email" : "🏷 List price unknown — try real prices from a status email"}
                 </button>
               )}
               {order && (

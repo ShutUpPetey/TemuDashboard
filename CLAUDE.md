@@ -19,7 +19,11 @@ Working: Gmail sync + vision parsing, split-order emails, adaptive two-shell UI
 cloud sync, order/item detail popups with full cross-linking, CSV/JSON export,
 carrier tracking via a scheduled GitHub Action (Shippo, $0.01/tracking number),
 auto-promotion of orders to "delivered" from carrier data, reconcile debugging
-tools (unmatched-status queue, find & import, downloadable log).
+tools (unmatched-status queue, find & import, downloadable log), unified
+multi-field search + filter/sort across Items and Orders in both shells,
+`fixEstimatedPrices` recovery of real prices from later status emails, and a
+two-tier review split between genuinely-estimated split-order prices and
+single-item orders whose paid amount is exact but list price is unknown.
 
 Open threads:
 
@@ -74,7 +78,11 @@ Order: `{ id: "PO-211-…", messageId, date, status: ordered|shipped|delivered|
 cancelled|returned, subtotal, discount, shipping, tax, total, discountFactor,
 items[], images[], orderUrl, eta (email text), tracking: {carrier, number, url},
 manualEdit }`. Item: `{ name, listed, paid, qty, category, discountPct,
-estimated, thumbUrl, thumbY }`. Store: `{ orders, processedIds, lastSync,
+estimated, listedUnknown, thumbUrl, thumbY }` — `estimated` means `paid` itself
+is a guess (multi-item split order, even-split fallback); `listedUnknown`
+means `paid` is exact but the pre-discount `listed` price was never shown
+(single-item split order — see `applyDiscounts` in `lib/discounts.js`); the
+two flags are mutually exclusive. Store: `{ orders, processedIds, lastSync,
 autoSync, updatedAt }` under IndexedDB key `temu-manifest-v1`, mirrored to
 Firebase `manifest/{uid}/state` as `{json, updatedAt}`.
 
@@ -137,6 +145,29 @@ eventTime, eventDesc, checkedAt, trackerId?/easypostId? }`.
   (still priceless) split confirmation.
 - **Carrier → status promotion**: an effect in App.jsx auto-flips shipped →
   delivered when carrier data says Delivered.
+- **Two-tier price review (`estimated` vs `listedUnknown`)**: `applyDiscounts`'
+  no-listed-price fallback (split-order confirmations with only a combined
+  total) used to flag every resulting item `estimated`. Now it only does that
+  for multi-item orders, where dividing the total across items is genuinely a
+  guess. A single-item order has no such ambiguity — 100% of the total
+  belongs to the one item, so `paid` is exact — so those get `listedUnknown`
+  instead: a lower-priority "could still fill in the list price later" flag,
+  not a "this number might be wrong" one. `reviewQueue()` in `lib/derive.js`
+  splits these into two buckets, `estimatedItems` and `listPriceUnknownItems`;
+  only the former counts toward the urgent Review badge. Both shells' Review
+  view and ItemSheet show a distinct 🏷 treatment for `listedUnknown` (vs the
+  amber "≈" for `estimated`), and both can trigger `fixEstimatedPrices` to try
+  recovering the real numbers from a later status email.
+- **Unified search + filter/sort (`lib/derive.js`: `matchesQuery`,
+  `itemSearchIndex`, `orderSearchIndex`)**: the single search box (shared
+  state, `c.query`) now matches across BOTH Items and Orders views in both
+  shells, against any field — item name/category, PO number, date, status,
+  carrier, tracking number, ETA, sibling item names, etc — via a flattened
+  lowercased index string per row (`idx()` helper) and a plain substring
+  test. The Orders view (previously unfiltered/unsortable in both shells) now
+  has a status filter and a sort control (date/total/status/PO on desktop;
+  date/total on mobile), matching the Items view's existing filter/sort
+  pattern.
 - **Thumbnails (CropThumb)**: receipt PNG is one tall image; crop math uses
   measured natural size + rows-per-image; trusts Claude's `y` only when the
   image's y-values are monotonic and sanely spaced (`annotateThumbs`).

@@ -9,7 +9,7 @@ import {
   StatusChip, CropThumb, annotateThumbs, Elapsed, Empty, LogPanel,
   carrierInfoFor, carrierEtaText, CARRIER_STATUS_LABEL,
 } from "./shared";
-import { sparkPoints, monthDelta, siblingOrders } from "../lib/derive";
+import { sparkPoints, monthDelta, siblingOrders, matchesQuery, itemSearchIndex, orderSearchIndex } from "../lib/derive";
 import { etaEndDate } from "../lib/gmail";
 import SettingsPanel from "./SettingsPanel";
 import AnalyticsView from "./AnalyticsView";
@@ -28,6 +28,8 @@ export default function DesktopShell({ c }) {
   const [catFilter, setCatFilter] = useState("All");
   const [statusFilter, setStatusFilter] = useState("All");
   const [sort, setSort] = useState({ key: "date", dir: -1 });
+  const [orderStatusFilter, setOrderStatusFilter] = useState("All");
+  const [orderSort, setOrderSort] = useState({ key: "date", dir: -1 });
   const [sheetItem, setSheetItem] = useState(null);     // shared ItemSheet target
   const [sheetOrderId, setSheetOrderId] = useState(null); // shared OrderSheet target
 
@@ -71,7 +73,9 @@ export default function DesktopShell({ c }) {
       ? c.allItems.filter((r) => isActiveStatus(r.status))
       : c.allItems.filter((r) => r.status === statusFilter);
     if (catFilter !== "All") rows = rows.filter((r) => r.category === catFilter);
-    if (c.query) rows = rows.filter((r) => (r.name || "").toLowerCase().includes(c.query.toLowerCase()));
+    // Multi-field: matches item name, category, PO number, date, or status —
+    // not just the name — so "16151" or "delivered" finds items too.
+    if (c.query) rows = rows.filter((r) => matchesQuery(itemSearchIndex(r), c.query));
     const { key, dir } = sort;
     return [...rows].sort((a, b) => {
       const va = a[key] ?? "", vb = b[key] ?? "";
@@ -79,6 +83,23 @@ export default function DesktopShell({ c }) {
       return String(va).localeCompare(String(vb)) * dir;
     });
   }, [c.allItems, c.query, catFilter, statusFilter, sort]);
+
+  /* Orders search/filter/sort — mirrors Items'. Search matches PO number,
+     date, status, carrier/tracking number, and item names within the
+     order (orderSearchIndex), not just the PO. */
+  const filteredOrders = useMemo(() => {
+    let rows = orderStatusFilter === "All"
+      ? c.data.orders
+      : c.data.orders.filter((o) => (o.status || "ordered") === orderStatusFilter);
+    if (c.query) rows = rows.filter((o) => matchesQuery(orderSearchIndex(o), c.query));
+    const { key, dir } = orderSort;
+    const val = (o) => key === "total" ? (o.total || 0) : key === "id" ? o.id : key === "status" ? (o.status || "ordered") : (o.date || "");
+    return [...rows].sort((a, b) => {
+      const va = val(a), vb = val(b);
+      if (typeof va === "number" || typeof vb === "number") return ((va || 0) - (vb || 0)) * dir;
+      return String(va).localeCompare(String(vb)) * dir;
+    });
+  }, [c.data.orders, c.query, orderStatusFilter, orderSort]);
 
   const th = (label, key, num) => (
     <th
@@ -148,11 +169,12 @@ export default function DesktopShell({ c }) {
           {/* topbar */}
           <div className="flex items-center gap-3 mb-5">
             <h1 className="disp text-xl font-extrabold tracking-tight">{TITLES[view]}</h1>
-            {view === "items" && (
+            {(view === "items" || view === "orders") && (
               <div className="relative">
                 <Search size={14} className="absolute left-2 top-2.5 text-stone-400" />
-                <input value={c.query} onChange={(e) => c.setQuery(e.target.value)} placeholder="Search items…"
-                  className="pl-7 pr-2 py-1.5 border border-stone-300 rounded-md text-sm w-56 bg-white focus:outline-none focus:border-orange-500" />
+                <input value={c.query} onChange={(e) => c.setQuery(e.target.value)}
+                  placeholder={view === "items" ? "Search items — name, PO, date, status…" : "Search orders — PO, date, status, carrier…"}
+                  className="pl-7 pr-2 py-1.5 border border-stone-300 rounded-md text-sm w-72 bg-white focus:outline-none focus:border-orange-500" />
               </div>
             )}
             <div className="ml-auto flex items-center gap-2">
@@ -177,7 +199,11 @@ export default function DesktopShell({ c }) {
           <LogPanel log={c.log} className="mb-4" />
 
           {view === "overview" && <Overview c={c} delta={delta} reviewCount={reviewCount} goView={setView} goOrder={openOrder} />}
-          {view === "orders" && <OrdersView c={c} expanded={expanded} setExpanded={setExpanded} goOrder={openOrder} openItem={setSheetItem} />}
+          {view === "orders" && (
+            <OrdersView c={c} orders={filteredOrders} expanded={expanded} setExpanded={setExpanded} goOrder={openOrder} openItem={setSheetItem}
+              orderStatusFilter={orderStatusFilter} setOrderStatusFilter={setOrderStatusFilter}
+              orderSort={orderSort} setOrderSort={setOrderSort} hasQuery={!!c.query} />
+          )}
           {view === "items" && (
             <ItemsView c={c} filteredItems={filteredItems} th={th}
               catFilter={catFilter} setCatFilter={setCatFilter}
@@ -358,11 +384,43 @@ function PanelHead({ title, action }) {
 
 /* ================= Orders ================= */
 
-function OrdersView({ c, expanded, setExpanded, goOrder, openItem }) {
+const ORDER_SORTS = [["date", "Date"], ["total", "Total"], ["status", "Status"], ["id", "PO"]];
+
+function OrdersView({ c, orders, expanded, setExpanded, goOrder, openItem, orderStatusFilter, setOrderStatusFilter, orderSort, setOrderSort, hasQuery }) {
   if (c.data.orders.length === 0) return <Empty syncing={c.syncing} />;
   return (
-    <div className="space-y-2">
-      {[...c.data.orders].sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((o) => (
+    <div className="space-y-3">
+      <div className="bg-white border border-stone-200 rounded-lg p-3 flex flex-wrap gap-2 items-center">
+        <select value={orderStatusFilter} onChange={(e) => setOrderStatusFilter(e.target.value)}
+          className="border border-stone-300 rounded-sm text-sm py-1.5 px-2 bg-white">
+          <option value="All">All statuses</option>
+          <option value="ordered">Ordered</option>
+          <option value="shipped">Shipped</option>
+          <option value="delivered">Delivered</option>
+          <option value="cancelled">Cancelled</option>
+          <option value="returned">Returned</option>
+        </select>
+        <span className="text-xs text-stone-400">Sort</span>
+        <select value={orderSort.key} onChange={(e) => setOrderSort((s) => ({ ...s, key: e.target.value }))}
+          className="border border-stone-300 rounded-sm text-sm py-1.5 px-2 bg-white">
+          {ORDER_SORTS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+        </select>
+        <button onClick={() => setOrderSort((s) => ({ ...s, dir: -s.dir }))}
+          className="border border-stone-300 rounded-sm text-sm py-1.5 px-2 bg-white text-stone-600 hover:text-stone-900"
+          title="Reverse sort direction">
+          {orderSort.dir === 1 ? "↑ asc" : "↓ desc"}
+        </button>
+        <span className="mono text-xs text-stone-500 ml-auto">
+          {orders.length} order{orders.length === 1 ? "" : "s"} · charged {fmt(orders.reduce((s, o) => s + (o.total || 0), 0))}
+        </span>
+      </div>
+      {orders.length === 0 ? (
+        <div className="text-center text-stone-400 py-10 text-sm bg-white border border-stone-200 rounded-lg">
+          No orders match{hasQuery ? " your search" : " this filter"}.
+        </div>
+      ) : (
+      <div className="space-y-2">
+      {orders.map((o) => (
         <div key={o.id} id={`d-order-${o.id}`} className={`border rounded-lg bg-white ${isActiveStatus(o.status) ? "border-stone-200" : "border-stone-200 bg-stone-50/60"}`}>
           <div className="flex flex-wrap items-center gap-2 px-3 py-2 cursor-pointer hover:bg-stone-50 rounded-lg"
             onClick={() => setExpanded((e) => ({ ...e, [o.id]: !e[o.id] }))}>
@@ -421,10 +479,11 @@ function OrdersView({ c, expanded, setExpanded, goOrder, openItem }) {
                           </td>
                           <td className="py-1 pr-2">{it.name} {it.qty > 1 && <span className="text-stone-400">×{it.qty}</span>}
                             <div className="text-[11px] text-stone-400">{it.category}</div></td>
-                          <td className="py-1 mono text-right text-stone-400 line-through">{it.estimated ? "" : fmt(it.listed)}</td>
+                          <td className="py-1 mono text-right text-stone-400 line-through">{it.estimated || it.listedUnknown ? "" : fmt(it.listed)}</td>
                           <td className="py-1 mono text-right font-semibold pl-3">
                             {fmt(it.paid)}
                             {it.estimated && <span className="text-amber-500 ml-0.5" title="Estimated — Temu's split-order email doesn't include a per-item price, so this is the order total split evenly across its items.">≈</span>}
+                            {!it.estimated && it.listedUnknown && <span className="text-stone-400 ml-0.5" title="Paid amount is exact — the pre-discount list price wasn't shown.">🏷</span>}
                           </td>
                         </tr>
                       ))}
@@ -451,6 +510,8 @@ function OrdersView({ c, expanded, setExpanded, goOrder, openItem }) {
           )}
         </div>
       ))}
+      </div>
+      )}
     </div>
   );
 }
@@ -613,10 +674,11 @@ function ItemsView({ c, filteredItems, th, catFilter, setCatFilter, statusFilter
                     </button>
                   </div></td>
                 <td className="py-1.5 pr-2 text-xs text-stone-500">{it.category}</td>
-                <td className="py-1.5 mono text-right text-stone-400 line-through">{it.estimated ? "" : fmt(it.listed)}</td>
+                <td className="py-1.5 mono text-right text-stone-400 line-through">{it.estimated || it.listedUnknown ? "" : fmt(it.listed)}</td>
                 <td className="py-1.5 mono text-right font-semibold">
                   {fmt(it.paid)}
                   {it.estimated && <span className="text-amber-500 ml-0.5" title="Estimated — split-order emails don't include per-item prices.">≈</span>}
+                  {!it.estimated && it.listedUnknown && <span className="text-stone-400 ml-0.5" title="Paid amount is exact (only item in this order) — the pre-discount list price wasn't shown.">🏷</span>}
                 </td>
                 <td className="py-1.5 mono text-right text-emerald-700 text-xs">{pct(it.discountPct)}</td>
                 <td className="py-1.5 px-2 text-xs whitespace-nowrap">{(it.date || "").slice(0, 10)}</td>
@@ -634,8 +696,12 @@ function ItemsView({ c, filteredItems, th, catFilter, setCatFilter, statusFilter
 /* ================= Needs review ================= */
 
 function ReviewView({ c, goEditOrder }) {
-  const { estimatedItems, emptyOrders } = c.review;
-  const nothing = !estimatedItems.length && !emptyOrders.length && !c.failedEmails.length && !c.unmatchedStatus.length;
+  const { estimatedItems, emptyOrders, listPriceUnknownItems } = c.review;
+  // listPriceUnknownItems doesn't count toward the urgent "Needs review"
+  // badge (see reviewCount in the parent) — its paid amount is exact, only
+  // the list price is unknown — but it still needs to show/hide this page's
+  // own "All clear" state correctly when it's the only non-empty bucket.
+  const nothing = !estimatedItems.length && !emptyOrders.length && !c.failedEmails.length && !c.unmatchedStatus.length && !listPriceUnknownItems.length;
   if (nothing) {
     return (
       <div className="text-center py-16 text-stone-400 border-2 border-dashed border-stone-200 rounded-lg bg-white">
@@ -688,6 +754,34 @@ function ReviewView({ c, goEditOrder }) {
                 <div className="min-w-0 flex-1">
                   <div className="text-[13px] font-medium truncate">{it.name}</div>
                   <div className="mono text-[10.5px] text-stone-400">{it.orderId} · paid ≈{fmt(it.paid)}</div>
+                </div>
+                <button onClick={() => c.fixEstimatedPrices(it.orderId)} disabled={c.syncing}
+                  className="text-xs font-semibold text-emerald-600 hover:text-emerald-500 whitespace-nowrap disabled:opacity-40">
+                  Try real prices
+                </button>
+                <button onClick={() => goEditOrder(it.orderId)} disabled={c.syncing}
+                  className="text-xs font-semibold text-blue-600 hover:text-blue-500 whitespace-nowrap disabled:opacity-40">
+                  <Pencil size={11} className="inline -mt-0.5 mr-1" />Fix price
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {listPriceUnknownItems.length > 0 && (
+        <div className="bg-white border border-stone-200 rounded-lg overflow-hidden">
+          <PanelHead title={`List price unknown (${listPriceUnknownItems.length})`} />
+          <div className="px-4 py-2 text-[12.5px] text-stone-500 border-b border-stone-100">
+            Single-item orders from split confirmations — the amount paid is exact (the whole order total belongs to this one item), only the pre-discount list price was never shown. Not urgent; fix it if you want the discount % to display.
+          </div>
+          <div className="divide-y divide-stone-100">
+            {listPriceUnknownItems.map((it, i) => (
+              <div key={i} className="flex items-center gap-3 px-4 py-2">
+                <CropThumb url={it.thumbUrl} y={it.thumbY} rows={it.thumbRows} idx={it.thumbIdx} trustY={it.thumbTrustY} size={36} onClick={() => it.thumbUrl && c.setLightbox(it.thumbUrl)} />
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13px] font-medium truncate">{it.name}</div>
+                  <div className="mono text-[10.5px] text-stone-400">{it.orderId} · paid {fmt(it.paid)} (exact)</div>
                 </div>
                 <button onClick={() => c.fixEstimatedPrices(it.orderId)} disabled={c.syncing}
                   className="text-xs font-semibold text-emerald-600 hover:text-emerald-500 whitespace-nowrap disabled:opacity-40">

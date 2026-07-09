@@ -7,7 +7,7 @@ import {
   CATEGORIES, fmt, pct, isActiveStatus, StatusChip, CropThumb, annotateThumbs, Elapsed, Empty, LogPanel,
   carrierInfoFor, carrierEtaText,
 } from "./shared";
-import { siblingOrders } from "../lib/derive";
+import { siblingOrders, matchesQuery, itemSearchIndex, orderSearchIndex } from "../lib/derive";
 import SettingsPanel from "./SettingsPanel";
 import AnalyticsView from "./AnalyticsView";
 import ItemSheet from "./ItemSheet";
@@ -27,10 +27,18 @@ const SORTS = [
   ["discountPct", "Discount"],
 ];
 
+const ORDER_STATUSES = ["All", "ordered", "shipped", "delivered", "cancelled", "returned"];
+const ORDER_SORTS = [
+  ["date", "Date"],
+  ["total", "Total"],
+];
+
 export default function MobileShell({ c }) {
   const [view, setView] = useState("items"); // items | orders | analytics | settings
-  const [chip, setChip] = useState("All");   // All | <category> | __transit | __review
+  const [chip, setChip] = useState("All");   // All | <category> | __transit | __review | __listprice
   const [sortKey, setSortKey] = useState("date");
+  const [orderStatusFilter, setOrderStatusFilter] = useState("All");
+  const [orderSort, setOrderSort] = useState({ key: "date", dir: -1 });
   const [sheet, setSheet] = useState(null);  // item row from allItems
   const [sheetOrderId, setSheetOrderId] = useState(null); // OrderSheet target
   const [expandedOrder, setExpandedOrder] = useState(null);
@@ -66,6 +74,7 @@ export default function MobileShell({ c }) {
       byCat,
       transit: c.allItems.filter((r) => r.status === "shipped").length,
       review: c.review.estimatedItems.length + c.review.emptyOrders.length + c.failedEmails.length + c.unmatchedStatus.length,
+      listPrice: c.review.listPriceUnknownItems?.length || 0,
     };
   }, [c.allItems, c.review, c.failedEmails]);
 
@@ -73,15 +82,28 @@ export default function MobileShell({ c }) {
     let r;
     if (chip === "__transit") r = c.allItems.filter((x) => x.status === "shipped");
     else if (chip === "__review") r = c.allItems.filter((x) => x.estimated);
+    else if (chip === "__listprice") r = c.allItems.filter((x) => x.listedUnknown && !x.estimated);
     else if (chip === "All") r = c.allItems.filter((x) => isActiveStatus(x.status));
     else r = c.allItems.filter((x) => isActiveStatus(x.status) && x.category === chip);
-    if (c.query) r = r.filter((x) => (x.name || "").toLowerCase().includes(c.query.toLowerCase()));
+    if (c.query) r = r.filter((x) => matchesQuery(itemSearchIndex(x), c.query));
     return [...r].sort((a, b) => {
       const va = a[sortKey] ?? "", vb = b[sortKey] ?? "";
       if (typeof va === "number" || typeof vb === "number") return (vb || 0) - (va || 0);
       return String(vb).localeCompare(String(va));
     });
   }, [c.allItems, chip, c.query, sortKey]);
+
+  const filteredOrders = useMemo(() => {
+    let r = c.data.orders;
+    if (orderStatusFilter !== "All") r = r.filter((o) => (o.status || "ordered") === orderStatusFilter);
+    if (c.query) r = r.filter((o) => matchesQuery(orderSearchIndex(o), c.query));
+    const { key, dir } = orderSort;
+    return [...r].sort((a, b) => {
+      if (key === "total") return dir * ((a.total || 0) - (b.total || 0));
+      if (key === "status") return dir * String(a.status || "ordered").localeCompare(String(b.status || "ordered"));
+      return dir * String(a.date || "").localeCompare(String(b.date || ""));
+    });
+  }, [c.data.orders, orderStatusFilter, c.query, orderSort]);
 
   const dock = useMemo(() => {
     const paid = rows.reduce((s, i) => s + (i.paid || 0) * (i.qty || 1), 0);
@@ -94,6 +116,7 @@ export default function MobileShell({ c }) {
     ...CATEGORIES.filter((cat) => counts.byCat[cat]).map((cat) => [cat, cat, counts.byCat[cat]]),
     ...(counts.transit ? [["__transit", "🚚 In transit", counts.transit]] : []),
     ...(counts.review ? [["__review", "⚠ Review", counts.review]] : []),
+    ...(counts.listPrice ? [["__listprice", "🏷 List price", counts.listPrice]] : []),
   ];
 
   return (
@@ -119,7 +142,8 @@ export default function MobileShell({ c }) {
           <span className="disp font-extrabold text-[15px] tracking-tight">📦 TEMU <span className="text-orange-600">MANIFEST</span></span>
           <div className="relative flex-1 max-w-[220px] ml-auto">
             <Search size={13} className="absolute left-2.5 top-2 text-stone-400" />
-            <input value={c.query} onChange={(e) => { c.setQuery(e.target.value); if (view !== "items") setView("items"); }} placeholder={`Search ${counts.all}…`}
+            <input value={c.query} onChange={(e) => c.setQuery(e.target.value)}
+              placeholder={view === "orders" ? `Search ${c.data.orders.length} orders…` : `Search ${counts.all} items…`}
               className="w-full pl-7 pr-2 py-1.5 bg-white border border-stone-200 rounded-full text-[13px] focus:outline-none focus:border-orange-400" />
           </div>
           <button onClick={() => c.sync(false)} disabled={c.syncing}
@@ -133,6 +157,16 @@ export default function MobileShell({ c }) {
               <button key={id} onClick={() => setChip(id)}
                 className={`shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-semibold border transition-colors ${chip === id ? "bg-stone-900 border-stone-900 text-white" : "bg-white border-stone-200 text-stone-500"}`}>
                 {label} <span className="mono text-[10px] opacity-60">{n}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {view === "orders" && (
+          <div className="flex gap-1.5 px-4 pb-2.5 overflow-x-auto no-scrollbar">
+            {ORDER_STATUSES.map((s) => (
+              <button key={s} onClick={() => setOrderStatusFilter(s)}
+                className={`shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-semibold border capitalize transition-colors ${orderStatusFilter === s ? "bg-stone-900 border-stone-900 text-white" : "bg-white border-stone-200 text-stone-500"}`}>
+                {s}
               </button>
             ))}
           </div>
@@ -167,8 +201,22 @@ export default function MobileShell({ c }) {
 
       {view === "orders" && (
         <div className="px-4 pt-3 space-y-2">
+          <div className="flex items-center text-[12px] text-stone-500 pb-1">
+            <span>{filteredOrders.length} order{filteredOrders.length === 1 ? "" : "s"}</span>
+            <div className="ml-auto flex gap-1">
+              {ORDER_SORTS.map(([k, label]) => (
+                <button key={k} onClick={() => setOrderSort((s) => ({ key: k, dir: s.key === k ? -s.dir : -1 }))}
+                  className={`px-2 py-0.5 rounded-full font-semibold ${orderSort.key === k ? "bg-stone-200 text-stone-800" : "text-stone-400"}`}>
+                  {label}{orderSort.key === k ? (orderSort.dir === 1 ? " ↑" : " ↓") : ""}
+                </button>
+              ))}
+            </div>
+          </div>
           {c.data.orders.length === 0 ? <Empty syncing={c.syncing} /> :
-            [...c.data.orders].sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((o) => {
+            filteredOrders.length === 0 ? (
+              <div className="text-center text-stone-400 text-[13px] py-10">No orders match.</div>
+            ) :
+            filteredOrders.map((o) => {
               const sibs = siblingOrders(c.data.orders, o);
               const live = carrierInfoFor(c.carrier, o);
               const liveEta = carrierEtaText(live);
@@ -201,7 +249,11 @@ export default function MobileShell({ c }) {
                           onClick={() => openItemFromOrder(o, it, i)}>
                           <CropThumb url={it.thumbUrl} y={it.thumbY} rows={it.thumbRows} idx={it.thumbIdx} trustY={it.thumbTrustY} size={38} rounded="rounded-lg" />
                           <div className="min-w-0 flex-1 text-[13px]">{it.name} {it.qty > 1 && <span className="text-stone-400">×{it.qty}</span>}</div>
-                          <div className="mono text-[13px] font-semibold">{fmt(it.paid)}{it.estimated && <span className="text-amber-500">≈</span>}</div>
+                          <div className="mono text-[13px] font-semibold">
+                            {fmt(it.paid)}
+                            {it.estimated && <span className="text-amber-500">≈</span>}
+                            {!it.estimated && it.listedUnknown && <span className="text-stone-400" title="Paid amount is exact — the pre-discount list price wasn't shown.">🏷</span>}
+                          </div>
                         </div>
                       ))}
                       <div className="mono text-[10.5px] text-stone-400 pt-2 flex flex-wrap gap-x-3">
@@ -368,9 +420,9 @@ function ItemCard({ it, size, onOpen }) {
     <div onClick={onOpen} className="bg-white border border-stone-200 rounded-2xl overflow-hidden active:scale-[.98] transition-transform cursor-pointer">
       <div className="relative">
         <CropThumb url={it.thumbUrl} y={it.thumbY} rows={it.thumbRows} idx={it.thumbIdx} trustY={it.thumbTrustY} size={size} rounded="rounded-none" />
-        {(off || it.estimated) && (
-          <span className={`absolute top-2 left-2 text-white text-[10.5px] font-extrabold rounded-md px-1.5 py-0.5 ${it.estimated ? "bg-amber-500" : "bg-emerald-600"}`}>
-            {it.estimated ? "≈ est" : off}
+        {(off || it.estimated || (it.listedUnknown && !it.estimated)) && (
+          <span className={`absolute top-2 left-2 text-white text-[10.5px] font-extrabold rounded-md px-1.5 py-0.5 ${it.estimated ? "bg-amber-500" : it.listedUnknown ? "bg-stone-500" : "bg-emerald-600"}`}>
+            {it.estimated ? "≈ est" : it.listedUnknown ? "🏷 list?" : off}
           </span>
         )}
         <span className={`absolute top-2 right-2 w-5 h-5 rounded-full grid place-items-center text-[10px] text-white ${dotCls}`}>{dotGlyph}</span>
@@ -379,7 +431,7 @@ function ItemCard({ it, size, onOpen }) {
         <div className="text-[12.5px] font-semibold leading-tight h-8 overflow-hidden">{it.name || "—"}</div>
         <div className="flex items-baseline gap-1.5 mt-1">
           <span className="mono text-[15px] font-semibold">{fmt(it.paid)}</span>
-          {!it.estimated && it.listed != null && <span className="text-[11px] text-stone-400 line-through">{fmt(it.listed)}</span>}
+          {!it.estimated && !it.listedUnknown && it.listed != null && <span className="text-[11px] text-stone-400 line-through">{fmt(it.listed)}</span>}
         </div>
         <div className="flex justify-between text-[10px] text-stone-400 mt-0.5">
           <span>{it.category}{it.qty > 1 ? ` · ×${it.qty}` : ""}</span>

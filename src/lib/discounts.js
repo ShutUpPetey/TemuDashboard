@@ -25,11 +25,20 @@ export function applyDiscounts(order) {
   if (base <= 0 && netMerch > 0) {
     const totalQty = items.reduce((s, it) => s + (it.qty || 1), 0) || 1;
     const perUnit = netMerch / totalQty;
+    // A single-item order has no ambiguity in how the total gets divided —
+    // 100% of netMerch belongs to that one item, so `paid` is exact, not a
+    // guess. Only the pre-discount LIST price is still unknown (Temu's
+    // split preview never showed one). Multi-item orders are genuinely
+    // estimated (the split across items is a guess); single-item orders
+    // get `listedUnknown` instead — a lower-priority "could fix the list
+    // price later" flag rather than a "this price might be wrong" one.
+    const singleItem = items.length === 1;
     items.forEach((it) => {
       it.paid = +(perUnit * (it.qty || 1)).toFixed(2);
       it.listed = it.listed || it.paid;
       it.discountPct = null;
-      it.estimated = true;
+      it.estimated = !singleItem;
+      it.listedUnknown = true;
     });
     order.discountFactor = null;
     return order;
