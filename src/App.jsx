@@ -16,6 +16,7 @@ import { CATEGORIES, fmt, numOrNull, annotateThumbs, Lightbox, THUMB_SIZE_KEY, T
 import { useLayoutMode } from "./hooks/useMediaQuery";
 import DesktopShell from "./components/DesktopShell";
 import MobileShell from "./components/MobileShell";
+import WelcomeModal from "./components/WelcomeModal";
 
 /* ============================================================
    Temu Order Manifest — syncs Gmail directly (Google OAuth + REST),
@@ -32,6 +33,7 @@ import MobileShell from "./components/MobileShell";
    ============================================================ */
 
 const STORAGE_KEY = "temu-manifest-v1";
+const WELCOME_SEEN_KEY = "temu-manifest-welcome-seen-v1";
 
 export default function App() {
   const [data, setData] = useState({ orders: [], processedIds: [], lastSync: null, autoSync: true });
@@ -40,6 +42,7 @@ export default function App() {
   const [log, setLog] = useState([]);
   const [query, setQuery] = useState("");
   const [lightbox, setLightbox] = useState(null);
+  const [showWelcome, setShowWelcome] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState(() => getApiKey());
   const [googleSignedIn, setGoogleSignedIn] = useState(() => isSignedIn());
   const [failedEmails, setFailedEmails] = useState([]);
@@ -90,9 +93,21 @@ export default function App() {
         const r = await storage.get(STORAGE_KEY);
         if (r?.value) setData((d) => ({ ...d, ...JSON.parse(r.value) }));
       } catch { /* first run */ }
+      try {
+        const w = await storage.get(WELCOME_SEEN_KEY);
+        if (!w?.value) setShowWelcome(true); // first-ever load — no seen flag yet
+      } catch { /* if this fails, better to show it than silently skip */ setShowWelcome(true); }
       setLoaded(true);
     })();
   }, []);
+
+  /* First-run tour: shown automatically once, re-launchable anytime from
+     Settings (openWelcome doesn't touch the persisted flag). */
+  const closeWelcome = useCallback(() => {
+    setShowWelcome(false);
+    storage.set(WELCOME_SEEN_KEY, "1").catch(() => {});
+  }, []);
+  const openWelcome = useCallback(() => setShowWelcome(true), []);
 
   const save = useCallback(async (next) => {
     // updatedAt is the whole-blob version for cloud newest-wins resolution.
@@ -1053,12 +1068,14 @@ export default function App() {
     lightbox, setLightbox,
     layoutOverride, setLayoutOverride,
     cloudState, carrier,
+    openWelcome,
   };
 
   return (
     <>
       {mode === "mobile" ? <MobileShell c={ctx} /> : <DesktopShell c={ctx} />}
       <Lightbox url={lightbox} onClose={() => setLightbox(null)} />
+      {showWelcome && <WelcomeModal onClose={closeWelcome} />}
     </>
   );
 }
