@@ -158,6 +158,23 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded]);
 
+  /* Carrier truth → order status. When the tracking worker reports a
+     package Delivered but the order still says "shipped" (Temu's delivered
+     email not synced yet, or matched wrong in an old sync), promote the
+     order automatically instead of waiting for an email pass. Idempotent:
+     once promoted, the filter matches nothing. */
+  useEffect(() => {
+    if (!loaded || syncing) return;
+    const done = data.orders.filter(
+      (o) => (o.status || "ordered") === "shipped" && o.tracking?.number && carrier[o.tracking.number]?.status === "Delivered"
+    );
+    if (!done.length) return;
+    const ids = new Set(done.map((o) => o.id));
+    save({ ...data, orders: data.orders.map((o) => (ids.has(o.id) ? { ...o, status: "delivered" } : o)) });
+    pushLog(`Carrier reported delivered — updated ${done.length} order(s): ${done.map((o) => o.id).join(", ")}`, "ok");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [carrier, loaded, syncing, data.orders]);
+
   /* ----- settings: API key ----- */
   const saveApiKey = useCallback((key) => {
     setApiKey(key);
