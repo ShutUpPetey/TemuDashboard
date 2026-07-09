@@ -1,15 +1,16 @@
 import React, { useMemo, useState } from "react";
 import {
   RefreshCw, Search, Settings2, BarChart3, ReceiptText,
-  LayoutGrid, RotateCcw, AlertTriangle, ExternalLink,
+  LayoutGrid, RotateCcw, AlertTriangle, ExternalLink, CalendarDays,
 } from "lucide-react";
 import {
   CATEGORIES, fmt, pct, isActiveStatus, StatusChip, CropThumb, annotateThumbs, Elapsed, Empty, LogPanel,
   carrierInfoFor, carrierEtaText,
 } from "./shared";
-import { siblingOrders, matchesQuery, itemSearchIndex, orderSearchIndex } from "../lib/derive";
+import { siblingOrders, matchesQuery, itemSearchIndex, orderSearchIndex, arrivingCalendar } from "../lib/derive";
 import SettingsPanel from "./SettingsPanel";
 import AnalyticsView from "./AnalyticsView";
+import ArrivingSoonView from "./ArrivingSoonView";
 import ItemSheet from "./ItemSheet";
 import OrderSheet from "./OrderSheet";
 import { useWindowWidth } from "../hooks/useMediaQuery";
@@ -34,7 +35,7 @@ const ORDER_SORTS = [
 ];
 
 export default function MobileShell({ c }) {
-  const [view, setView] = useState("items"); // items | orders | analytics | settings
+  const [view, setView] = useState("items"); // items | orders | arriving | analytics | settings
   const [chip, setChip] = useState("All");   // All | <category> | __transit | __review | __listprice
   const [sortKey, setSortKey] = useState("date");
   const [orderStatusFilter, setOrderStatusFilter] = useState("All");
@@ -104,6 +105,8 @@ export default function MobileShell({ c }) {
       return dir * String(a.date || "").localeCompare(String(b.date || ""));
     });
   }, [c.data.orders, orderStatusFilter, c.query, orderSort]);
+
+  const overdueCount = useMemo(() => arrivingCalendar(c.data.orders, c.carrier, 14).overdueItems.length, [c.data.orders, c.carrier]);
 
   const dock = useMemo(() => {
     const paid = rows.reduce((s, i) => s + (i.paid || 0) * (i.qty || 1), 0);
@@ -290,6 +293,12 @@ export default function MobileShell({ c }) {
         </div>
       )}
 
+      {view === "arriving" && (
+        <div className="px-4 pt-3">
+          <ArrivingSoonView c={c} openItem={(it) => setSheet(it)} />
+        </div>
+      )}
+
       {view === "analytics" && (
         <div className="px-4 pt-3">
           <div className="bg-white border border-stone-200 rounded-xl p-3">
@@ -347,11 +356,12 @@ export default function MobileShell({ c }) {
           <DockStat k="Avg off" v={pct(dock.off)} cls="text-emerald-300" />
         </div>
         <div className="flex items-center justify-around pt-1.5">
-          {[["items", LayoutGrid, "Items"], ["orders", ReceiptText, "Orders"], ["analytics", BarChart3, "Charts"], ["settings", Settings2, "Settings"]].map(([id, Icon, label]) => (
+          {[["items", LayoutGrid, "Items"], ["orders", ReceiptText, "Orders"], ["arriving", CalendarDays, "Arriving"], ["analytics", BarChart3, "Charts"], ["settings", Settings2, "Settings"]].map(([id, Icon, label]) => (
             <button key={id} onClick={() => setView(id)}
               className={`flex flex-col items-center gap-0.5 px-3 py-1 rounded-lg text-[10px] font-semibold ${view === id ? "text-orange-300" : "text-stone-400"}`}>
               <Icon size={17} />{label}
               {id === "settings" && counts.review > 0 && <span className="absolute translate-x-3 -translate-y-1 w-2 h-2 rounded-full bg-amber-400" />}
+              {id === "arriving" && overdueCount > 0 && <span className="absolute translate-x-3 -translate-y-1 w-2 h-2 rounded-full bg-red-500" />}
             </button>
           ))}
         </div>
