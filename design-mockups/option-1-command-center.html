@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Option 1 — Command Center</title>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #f5f5f4; --panel: #ffffff; --ink: #1c1917; --muted: #78716c;
+    --line: #e7e5e4; --orange: #ea580c; --orange-soft: #ffedd5;
+    --green: #059669; --green-soft: #d1fae5; --blue: #2563eb; --blue-soft: #dbeafe;
+    --sidebar: #1c1917; --sidebar-ink: #d6d3d1;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: Inter, system-ui, sans-serif; background: var(--bg); color: var(--ink); display: flex; min-height: 100vh; }
+  .mono { font-family: "JetBrains Mono", monospace; }
+  .disp { font-family: Archivo, sans-serif; }
+
+  /* ---- Sidebar ---- */
+  aside { width: 220px; background: var(--sidebar); color: var(--sidebar-ink); padding: 20px 14px; display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; }
+  aside .logo { display: flex; align-items: center; gap: 8px; font-family: Archivo; font-weight: 800; color: #fff; font-size: 15px; letter-spacing: -.02em; margin-bottom: 18px; }
+  aside .logo .dot { width: 26px; height: 26px; border-radius: 6px; background: var(--orange); display: grid; place-items: center; font-size: 14px; }
+  aside a { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: var(--sidebar-ink); text-decoration: none; font-size: 13.5px; font-weight: 500; }
+  aside a.active { background: rgba(234,88,12,.18); color: #fdba74; }
+  aside a:hover:not(.active) { background: rgba(255,255,255,.06); }
+  aside a .n { margin-left: auto; font-family: "JetBrains Mono"; font-size: 11px; color: #a8a29e; }
+  aside .foot { margin-top: auto; font-size: 11px; color: #78716c; border-top: 1px solid #292524; padding-top: 12px; line-height: 1.6; }
+  aside .foot .ok { color: #34d399; }
+
+  /* ---- Main ---- */
+  main { flex: 1; padding: 24px 28px; max-width: 1200px; }
+  .topbar { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+  .topbar h1 { font-family: Archivo; font-size: 20px; font-weight: 800; letter-spacing: -.02em; }
+  .search { flex: 1; max-width: 340px; display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; color: var(--muted); font-size: 13px; }
+  .btn { display: inline-flex; align-items: center; gap: 7px; border-radius: 8px; padding: 9px 14px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid var(--line); background: var(--panel); }
+  .btn.primary { background: var(--orange); border-color: var(--orange); color: #fff; }
+  .topbar .right { margin-left: auto; display: flex; gap: 8px; }
+
+  /* ---- KPI cards ---- */
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .kpi .label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+  .kpi .value { font-family: "JetBrains Mono"; font-size: 24px; font-weight: 600; margin: 6px 0 2px; }
+  .kpi .trend { font-size: 11.5px; font-weight: 600; }
+  .kpi .trend.up { color: var(--green); } .kpi .trend.down { color: #dc2626; }
+  .kpi svg { width: 100%; height: 28px; margin-top: 8px; }
+  .kpi.hero { background: linear-gradient(135deg, #1c1917, #292524); border-color: #1c1917; color: #fff; }
+  .kpi.hero .label { color: #a8a29e; } .kpi.hero .value { color: #fdba74; }
+
+  /* ---- Panel ---- */
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 20px; }
+  .panel-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .panel-head h2 { font-family: Archivo; font-size: 14px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
+  .chip { font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); cursor: pointer; background: #fafaf9; }
+  .chip.on { background: var(--orange-soft); border-color: #fdba74; color: #9a3412; }
+  .panel-head .right { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th { text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); padding: 9px 16px; border-bottom: 1px solid var(--line); background: #fafaf9; }
+  th.r, td.r { text-align: right; }
+  td { padding: 10px 16px; border-bottom: 1px solid #f5f5f4; vertical-align: middle; }
+  tr:hover td { background: #fffbf7; }
+  tr.expanded td { background: #fff7ed; }
+  .thumb { width: 34px; height: 34px; border-radius: 7px; background: linear-gradient(135deg, #fde68a, #fca5a5); display: inline-grid; place-items: center; font-size: 17px; vertical-align: middle; }
+  .item-name { font-weight: 500; }
+  .item-sub { font-size: 11px; color: var(--muted); font-family: "JetBrains Mono"; }
+  .badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; padding: 3px 9px; border-radius: 999px; }
+  .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .b-del { background: var(--green-soft); color: #065f46; }
+  .b-ship { background: var(--blue-soft); color: #1e40af; }
+  .b-ord { background: #f5f5f4; color: #57534e; }
+  .strike { color: #a8a29e; text-decoration: line-through; font-size: 12px; margin-right: 6px; }
+  .paid { font-family: "JetBrains Mono"; font-weight: 600; }
+  .disc { color: var(--green); font-size: 11.5px; font-weight: 600; }
+
+  /* expanded detail row */
+  .detail { display: flex; gap: 24px; padding: 4px 0 8px; }
+  .detail .col { font-size: 12px; color: var(--muted); }
+  .detail .col b { display: block; color: var(--ink); font-family: "JetBrains Mono"; font-size: 13px; margin-top: 2px; }
+  .detail .actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .mini { font-size: 12px; font-weight: 600; color: var(--blue); cursor: pointer; }
+
+  .two-col { display: grid; grid-template-columns: 1.6fr 1fr; gap: 12px; }
+  .barrow { display: grid; grid-template-columns: 90px 1fr 60px; align-items: center; gap: 10px; padding: 7px 16px; font-size: 13px; }
+  .bar { height: 10px; border-radius: 5px; background: linear-gradient(90deg, var(--orange), #fb923c); }
+  .barrow .amt { font-family: "JetBrains Mono"; font-size: 12px; text-align: right; color: var(--muted); }
+
+  .note { font-size: 11.5px; color: var(--muted); padding: 10px 16px; background: #fafaf9; border-top: 1px solid var(--line); }
+  @media (max-width: 900px) { .kpis { grid-template-columns: repeat(2,1fr); } .two-col { grid-template-columns: 1fr; } aside { display: none; } }
+</style>
+</head>
+<body>
+
+<aside>
+  <div class="logo"><span class="dot">📦</span> TEMU MANIFEST</div>
+  <a class="active" href="#">▦ &nbsp;Overview</a>
+  <a href="#">🧾 &nbsp;Orders <span class="n">38</span></a>
+  <a href="#">🏷 &nbsp;Items <span class="n">214</span></a>
+  <a href="#">📈 &nbsp;Analytics</a>
+  <a href="#">⚠ &nbsp;Needs review <span class="n" style="color:#fbbf24">3</span></a>
+  <a href="#">⚙ &nbsp;Settings</a>
+  <div class="foot">
+    <span class="ok">●</span> Gmail connected<br />
+    Last sync 8:42 AM · <u>sync now</u>
+  </div>
+</aside>
+
+<main>
+  <div class="topbar">
+    <h1>Overview</h1>
+    <div class="search">🔍 Search items, orders… <span class="mono" style="margin-left:auto;font-size:11px;border:1px solid var(--line);border-radius:4px;padding:1px 5px">/</span></div>
+    <div class="right">
+      <button class="btn">↧ Export</button>
+      <button class="btn primary">⟳ Check Gmail</button>
+    </div>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi hero">
+      <div class="label">Total charged</div>
+      <div class="value">$1,847.22</div>
+      <div class="trend up">▲ $212 this month</div>
+      <svg viewBox="0 0 100 28" preserveAspectRatio="none"><polyline points="0,24 14,20 28,22 42,15 56,17 70,10 84,12 100,4" fill="none" stroke="#fb923c" stroke-width="2"/></svg>
+    </div>
+    <div class="kpi">
+      <div class="label">Discounts captured</div>
+      <div class="value" style="color:var(--green)">$3,102.48</div>
+      <div class="trend up">62% avg off list</div>
+      <svg viewBox="0 0 100 28" preserveAspectRatio="none"><polyline points="0,20 20,18 40,14 60,15 80,8 100,6" fill="none" stroke="#059669" stroke-width="2"/></svg>
+    </div>
+    <div class="kpi">
+      <div class="label">Avg $ / item</div>
+      <div class="value">$8.63</div>
+      <div class="trend down">▼ $0.41 vs last month</div>
+      <svg viewBox="0 0 100 28" preserveAspectRatio="none"><polyline points="0,10 20,12 40,9 60,16 80,14 100,18" fill="none" stroke="#a8a29e" stroke-width="2"/></svg>
+    </div>
+    <div class="kpi">
+      <div class="label">In transit</div>
+      <div class="value" style="color:var(--blue)">4</div>
+      <div class="trend">2 arriving this week</div>
+      <svg viewBox="0 0 100 28" preserveAspectRatio="none"><polyline points="0,22 25,18 50,20 75,10 100,12" fill="none" stroke="#2563eb" stroke-width="2"/></svg>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Recent orders</h2>
+      <span class="chip on">All</span><span class="chip">Ordered</span><span class="chip">Shipped</span><span class="chip">Delivered</span>
+      <div class="right"><span class="chip">⇅ Newest first</span></div>
+    </div>
+    <table>
+      <tr><th></th><th>Item</th><th>Order</th><th>Status</th><th class="r">Paid</th></tr>
+      <tr>
+        <td><span class="thumb">🔦</span></td>
+        <td><div class="item-name">Rechargeable LED Headlamp 3-Pack</div><div class="item-sub">Tools · ×3</div></td>
+        <td class="mono" style="font-size:12px;color:var(--muted)">PO-211-0482 · Jul 2</td>
+        <td><span class="badge b-ship">Shipped</span></td>
+        <td class="r"><span class="strike">$29.97</span><span class="paid">$11.24</span><div class="disc">62% off</div></td>
+      </tr>
+      <tr class="expanded">
+        <td><span class="thumb">🍳</span></td>
+        <td><div class="item-name">Silicone Baking Mat Set</div><div class="item-sub">Kitchen · ×2</div></td>
+        <td class="mono" style="font-size:12px;color:var(--muted)">PO-211-0475 · Jun 28</td>
+        <td><span class="badge b-del">Delivered</span></td>
+        <td class="r"><span class="strike">$18.98</span><span class="paid">$6.87</span><div class="disc">64% off</div></td>
+      </tr>
+      <tr class="expanded"><td colspan="5">
+        <div class="detail">
+          <div class="col">Subtotal<b>$41.96</b></div>
+          <div class="col">Discount<b style="color:var(--green)">−$27.11</b></div>
+          <div class="col">Shipping<b>$0.00</b></div>
+          <div class="col">Tax<b>$1.32</b></div>
+          <div class="col">Charged<b>$16.17</b></div>
+          <div class="actions"><span class="mini">✎ Edit</span><span class="mini">🖼 Receipt</span><span class="mini" style="color:#dc2626">🗑</span></div>
+        </div>
+      </td></tr>
+      <tr>
+        <td><span class="thumb">🧲</span></td>
+        <td><div class="item-name">Magnetic Tool Holder Strip 12"</div><div class="item-sub">Tools · ×1</div></td>
+        <td class="mono" style="font-size:12px;color:var(--muted)">PO-211-0475 · Jun 28</td>
+        <td><span class="badge b-del">Delivered</span></td>
+        <td class="r"><span class="strike">$12.99</span><span class="paid">$4.66</span><div class="disc">64% off</div></td>
+      </tr>
+      <tr>
+        <td><span class="thumb">🧦</span></td>
+        <td><div class="item-name">Wool Hiking Socks 5-Pack</div><div class="item-sub">Clothing · ×1 · <span style="color:#d97706">≈ estimated</span></div></td>
+        <td class="mono" style="font-size:12px;color:var(--muted)">PO-211-0461 · Jun 21</td>
+        <td><span class="badge b-ord">Ordered</span></td>
+        <td class="r"><span class="paid">$9.50</span><div class="disc" style="color:#d97706">needs review</div></td>
+      </tr>
+    </table>
+    <div class="note">⚠ 3 items flagged for review — vision read low-confidence prices. <b style="color:var(--blue);cursor:pointer">Review queue →</b></div>
+  </div>
+
+  <div class="two-col">
+    <div class="panel">
+      <div class="panel-head"><h2>Spend by category</h2><div class="right"><span class="chip">This year</span></div></div>
+      <div style="padding:8px 0 12px">
+        <div class="barrow"><span>Tools</span><div class="bar" style="width:92%"></div><span class="amt">$512</span></div>
+        <div class="barrow"><span>Home</span><div class="bar" style="width:70%;opacity:.85"></div><span class="amt">$389</span></div>
+        <div class="barrow"><span>Kitchen</span><div class="bar" style="width:52%;opacity:.7"></div><span class="amt">$291</span></div>
+        <div class="barrow"><span>Outdoors</span><div class="bar" style="width:41%;opacity:.6"></div><span class="amt">$228</span></div>
+        <div class="barrow"><span>Electronics</span><div class="bar" style="width:30%;opacity:.5"></div><span class="amt">$167</span></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Arriving soon</h2></div>
+      <table>
+        <tr><td><span class="thumb" style="width:28px;height:28px;font-size:14px">🔦</span></td><td style="font-size:13px">LED Headlamps<div class="item-sub">UPS · est. Jul 10</div></td><td class="r"><span class="badge b-ship">2 days</span></td></tr>
+        <tr><td><span class="thumb" style="width:28px;height:28px;font-size:14px">🪴</span></td><td style="font-size:13px">Plant Stand<div class="item-sub">USPS · est. Jul 12</div></td><td class="r"><span class="badge b-ship">4 days</span></td></tr>
+        <tr><td><span class="thumb" style="width:28px;height:28px;font-size:14px">🎣</span></td><td style="font-size:13px">Fishing Lure Kit<div class="item-sub">label created</div></td><td class="r"><span class="badge b-ord">pending</span></td></tr>
+      </table>
+    </div>
+  </div>
+</main>
+
+</body>
+</html>

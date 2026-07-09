@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Option 2 — Paper Ledger</title>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;800&family=JetBrains+Mono:wght@400;600;800&family=Caveat:wght@600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --desk: #292018; --paper: #fdfbf5; --paper2: #faf6ec; --ink: #292524;
+    --faint: #a8a29e; --rule: #e7e0d0; --orange: #c2410c; --green: #047857;
+    --red: #b91c1c; --blue: #1d4ed8;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--desk) url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" opacity="0.04"><rect width="40" height="80" fill="white"/></svg>'); font-family: "JetBrains Mono", monospace; color: var(--ink); padding: 30px 16px 80px; }
+  .desk { max-width: 760px; margin: 0 auto; }
+
+  /* ---- Clipboard header ---- */
+  .clip { background: #44403c; border-radius: 12px 12px 0 0; padding: 14px 22px 12px; color: #e7e5e4; display: flex; align-items: center; gap: 14px; box-shadow: 0 2px 8px rgba(0,0,0,.4); position: relative; }
+  .clip::before { content: ""; position: absolute; top: -12px; left: 50%; transform: translateX(-50%); width: 90px; height: 20px; background: #78716c; border-radius: 6px 6px 0 0; box-shadow: inset 0 -3px 4px rgba(0,0,0,.3); }
+  .clip h1 { font-family: Archivo; font-weight: 800; font-size: 17px; letter-spacing: .06em; }
+  .clip .sub { font-size: 10.5px; color: #a8a29e; }
+  .clip .sync { margin-left: auto; background: var(--orange); color: #fff; font-family: Archivo; font-weight: 800; font-size: 12px; letter-spacing: .05em; padding: 9px 16px; border-radius: 4px; cursor: pointer; box-shadow: 0 2px 0 #7c2d12; }
+
+  /* ---- Receipt tape totals ---- */
+  .tape { background: var(--paper); padding: 18px 26px 22px; box-shadow: 0 3px 10px rgba(0,0,0,.35);
+    -webkit-mask: linear-gradient(#000 0 0) padding-box, radial-gradient(circle at 8px 100%, transparent 7px, #000 7.5px) bottom left / 16px 16px repeat-x;
+    mask-composite: intersect; margin-bottom: 26px; }
+  .tape h2 { font-family: Archivo; font-size: 11px; letter-spacing: .25em; text-align: center; color: var(--faint); border-bottom: 1px dashed var(--rule); padding-bottom: 8px; margin-bottom: 10px; }
+  .trow { display: flex; justify-content: space-between; font-size: 13px; padding: 3.5px 0; }
+  .trow.big { font-size: 17px; font-weight: 800; border-top: 1px dashed var(--rule); margin-top: 6px; padding-top: 9px; }
+  .trow .dots { flex: 1; border-bottom: 1px dotted var(--rule); margin: 0 8px 4px; }
+  .trow .grn { color: var(--green); }
+  .barcode { margin: 12px auto 0; width: 180px; height: 26px; background: repeating-linear-gradient(90deg, var(--ink) 0 2px, transparent 2px 4px, var(--ink) 4px 5px, transparent 5px 9px); opacity: .8; }
+
+  /* ---- Filter tabs as index tabs ---- */
+  .tabs { display: flex; gap: 6px; padding-left: 14px; }
+  .tabs span { background: var(--paper2); border-radius: 8px 8px 0 0; padding: 8px 18px 6px; font-family: Archivo; font-weight: 800; font-size: 12px; letter-spacing: .08em; color: var(--faint); cursor: pointer; box-shadow: 0 -2px 5px rgba(0,0,0,.15); }
+  .tabs span.on { background: var(--paper); color: var(--orange); padding-bottom: 10px; }
+
+  /* ---- Order cards as receipts ---- */
+  .receipt { background: var(--paper); box-shadow: 0 4px 14px rgba(0,0,0,.35); padding: 20px 26px; margin-bottom: 22px; position: relative;
+    -webkit-mask: radial-gradient(circle at 8px 0, transparent 7px, #000 7.5px) top left / 16px 16px repeat-x,
+                  radial-gradient(circle at 8px 100%, transparent 7px, #000 7.5px) bottom left / 16px 16px repeat-x,
+                  linear-gradient(#000 8px, #000 calc(100% - 8px));
+    -webkit-mask-composite: source-over; mask-composite: add; }
+  .receipt:nth-child(odd) { transform: rotate(-.35deg); }
+  .receipt:nth-child(even) { transform: rotate(.3deg); }
+
+  .rhead { display: flex; align-items: baseline; gap: 12px; border-bottom: 2px solid var(--ink); padding-bottom: 8px; margin-bottom: 10px; }
+  .rhead .po { font-weight: 800; font-size: 14px; }
+  .rhead .date { font-size: 11px; color: var(--faint); }
+  .rhead .total { margin-left: auto; font-weight: 800; font-size: 16px; }
+
+  .line { display: grid; grid-template-columns: 44px 1fr auto; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px dotted var(--rule); }
+  .line:last-of-type { border-bottom: none; }
+  .ph { width: 44px; height: 44px; border-radius: 4px; display: grid; place-items: center; font-size: 22px; border: 1px solid var(--rule); background: #fff; }
+  .line .nm { font-size: 13px; line-height: 1.35; }
+  .line .meta { font-size: 10.5px; color: var(--faint); margin-top: 2px; }
+  .line .prices { text-align: right; }
+  .line .was { font-size: 11px; color: var(--faint); text-decoration: line-through; }
+  .line .now { font-size: 14px; font-weight: 800; }
+  .line .off { font-size: 10.5px; color: var(--green); font-weight: 600; }
+
+  .rfoot { border-top: 1px dashed var(--rule); margin-top: 8px; padding-top: 8px; display: flex; gap: 16px; font-size: 11px; color: var(--faint); }
+  .rfoot b { color: var(--ink); }
+  .rfoot .edit { margin-left: auto; color: var(--blue); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+
+  /* ---- Rubber stamps ---- */
+  .stamp { position: absolute; top: 14px; right: 20px; font-family: Archivo; font-weight: 800; font-size: 15px; letter-spacing: .12em; text-transform: uppercase; padding: 5px 14px; border: 3px double currentColor; border-radius: 6px; transform: rotate(8deg); opacity: .82; mix-blend-mode: multiply; }
+  .stamp.delivered { color: var(--green); transform: rotate(-7deg); }
+  .stamp.shipped { color: var(--blue); transform: rotate(6deg); }
+  .stamp.cancelled { color: var(--red); transform: rotate(-10deg); }
+
+  /* handwritten annotation */
+  .scribble { font-family: Caveat, cursive; font-size: 19px; color: var(--blue); transform: rotate(-2deg); display: inline-block; }
+
+  /* sticky note */
+  .sticky { position: fixed; right: 26px; bottom: 26px; width: 190px; background: #fef08a; padding: 14px 16px; font-family: Caveat, cursive; font-size: 18px; line-height: 1.3; color: #713f12; transform: rotate(2.5deg); box-shadow: 0 6px 14px rgba(0,0,0,.4); }
+  .sticky b { display: block; font-size: 20px; }
+</style>
+</head>
+<body>
+<div class="desk">
+
+  <div class="clip">
+    <div>
+      <h1>TEMU ORDER MANIFEST</h1>
+      <div class="sub">personal purchase ledger · gmail-synced · last checked 8:42 AM</div>
+    </div>
+    <div class="sync">⟳ CHECK GMAIL</div>
+  </div>
+
+  <div class="tape">
+    <h2>· · ·  R U N N I N G &nbsp; T O T A L S  · · ·</h2>
+    <div class="trow"><span>LISTED VALUE</span><span class="dots"></span><span>$4,949.70</span></div>
+    <div class="trow"><span>DISCOUNTS CAPTURED</span><span class="dots"></span><span class="grn">−$3,102.48</span></div>
+    <div class="trow"><span>AVG DISCOUNT</span><span class="dots"></span><span class="grn">62%</span></div>
+    <div class="trow"><span>ORDERS / ITEMS</span><span class="dots"></span><span>38 / 214</span></div>
+    <div class="trow big"><span>TOTAL CHARGED</span><span style="color:var(--orange)">$1,847.22</span></div>
+    <div class="barcode"></div>
+  </div>
+
+  <div class="tabs">
+    <span class="on">ORDERS</span><span>ITEMS</span><span>ANALYTICS</span>
+  </div>
+
+  <div class="receipt">
+    <div class="stamp shipped">Shipped</div>
+    <div class="rhead"><span class="po">PO-211-0482</span><span class="date">JUL 02 2026</span><span class="total">$11.24</span></div>
+    <div class="line">
+      <div class="ph">🔦</div>
+      <div><div class="nm">Rechargeable LED Headlamp, 3-Pack</div><div class="meta">TOOLS · QTY 3</div></div>
+      <div class="prices"><div class="was">$29.97</div><div class="now">$11.24</div><div class="off">62% OFF</div></div>
+    </div>
+    <div class="rfoot">
+      <span>SUB <b>$29.97</b></span><span>DISC <b style="color:var(--green)">−$18.73</b></span><span>SHIP <b>$0.00</b></span><span>TAX <b>$0.79</b></span>
+      <span class="edit">✎ correct this</span>
+    </div>
+  </div>
+
+  <div class="receipt">
+    <div class="stamp delivered">Delivered</div>
+    <div class="rhead"><span class="po">PO-211-0475</span><span class="date">JUN 28 2026</span><span class="total">$16.17</span></div>
+    <div class="line">
+      <div class="ph">🍳</div>
+      <div><div class="nm">Silicone Baking Mat Set, 2 pc</div><div class="meta">KITCHEN · QTY 2 &nbsp; <span class="scribble">good ones! ↰</span></div></div>
+      <div class="prices"><div class="was">$18.98</div><div class="now">$6.87</div><div class="off">64% OFF</div></div>
+    </div>
+    <div class="line">
+      <div class="ph">🧲</div>
+      <div><div class="nm">Magnetic Tool Holder Strip 12"</div><div class="meta">TOOLS · QTY 1</div></div>
+      <div class="prices"><div class="was">$12.99</div><div class="now">$4.66</div><div class="off">64% OFF</div></div>
+    </div>
+    <div class="line">
+      <div class="ph">🪝</div>
+      <div><div class="nm">Adhesive Wall Hooks, 20-Pack</div><div class="meta">HOME · QTY 1</div></div>
+      <div class="prices"><div class="was">$9.99</div><div class="now">$3.58</div><div class="off">64% OFF</div></div>
+    </div>
+    <div class="rfoot">
+      <span>SUB <b>$41.96</b></span><span>DISC <b style="color:var(--green)">−$27.11</b></span><span>SHIP <b>$0.00</b></span><span>TAX <b>$1.32</b></span>
+      <span class="edit">✎ correct this</span>
+    </div>
+  </div>
+
+  <div class="receipt">
+    <div class="stamp cancelled">Cancelled</div>
+    <div class="rhead" style="opacity:.55"><span class="po" style="text-decoration:line-through">PO-211-0468</span><span class="date">JUN 24 2026</span><span class="total">$21.40</span></div>
+    <div class="line" style="opacity:.55">
+      <div class="ph">🪑</div>
+      <div><div class="nm">Folding Camp Stool</div><div class="meta">OUTDOORS · QTY 2</div></div>
+      <div class="prices"><div class="was">$25.98</div><div class="now">$21.40</div><div class="off">18% OFF</div></div>
+    </div>
+    <div class="rfoot"><span style="color:var(--red)">EXCLUDED FROM TOTALS</span><span class="edit">✎ correct this</span></div>
+  </div>
+
+  <div class="sticky"><b>4 in transit ✈</b>headlamps due Thu, plant stand Sat</div>
+
+</div>
+</body>
+</html>
