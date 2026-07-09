@@ -31,7 +31,7 @@ export default function DesktopShell({ c }) {
   const [sheetItem, setSheetItem] = useState(null);     // shared ItemSheet target
   const [sheetOrderId, setSheetOrderId] = useState(null); // shared OrderSheet target
 
-  const reviewCount = c.review.estimatedItems.length + c.review.emptyOrders.length + c.failedEmails.length;
+  const reviewCount = c.review.estimatedItems.length + c.review.emptyOrders.length + c.failedEmails.length + c.unmatchedStatus.length;
   const delta = monthDelta(c.stats.monthData);
 
   /* Open the order POPUP — the default way to view an order from anywhere
@@ -635,7 +635,7 @@ function ItemsView({ c, filteredItems, th, catFilter, setCatFilter, statusFilter
 
 function ReviewView({ c, goEditOrder }) {
   const { estimatedItems, emptyOrders } = c.review;
-  const nothing = !estimatedItems.length && !emptyOrders.length && !c.failedEmails.length;
+  const nothing = !estimatedItems.length && !emptyOrders.length && !c.failedEmails.length && !c.unmatchedStatus.length;
   if (nothing) {
     return (
       <div className="text-center py-16 text-stone-400 border-2 border-dashed border-stone-200 rounded-lg bg-white">
@@ -647,6 +647,37 @@ function ReviewView({ c, goEditOrder }) {
   }
   return (
     <div className="space-y-4">
+      {c.unmatchedStatus.length > 0 && (
+        <div className="bg-white border border-stone-200 rounded-lg overflow-hidden">
+          <PanelHead title={`Status emails with no matching order (${c.unmatchedStatus.length})`} />
+          <div className="px-4 py-2 text-[12.5px] text-stone-500 border-b border-stone-100">
+            Temu sent a shipped/delivered/cancelled email but the order it belongs to isn't in the store — usually a split-email sub-order the parser missed. <b>Find &amp; import</b> hunts down its confirmation email and parses just that order.
+          </div>
+          <div className="divide-y divide-stone-100">
+            {c.unmatchedStatus.map((u) => (
+              <div key={u.id} className="flex items-center gap-3 px-4 py-2 text-[13px]">
+                <StatusChip s={u.kind} />
+                <span className="mono font-semibold">{u.oid || "(no PO readable)"}</span>
+                <span className="text-[11px] text-stone-400">{u.date || ""}</span>
+                <span className="ml-auto flex items-center gap-3">
+                  {u.oid && (
+                    <button onClick={() => c.importMissingOrder(u.oid)} disabled={c.syncing}
+                      className="text-xs font-bold text-blue-600 hover:text-blue-500 disabled:opacity-40">
+                      Find &amp; import
+                    </button>
+                  )}
+                  <a href={`https://mail.google.com/mail/u/0/#search/${encodeURIComponent(u.oid || "from:transaction.temu.com")}`}
+                    target="_blank" rel="noreferrer"
+                    className="text-xs font-semibold text-stone-400 hover:text-stone-600 inline-flex items-center gap-0.5">
+                    Gmail <ExternalLink size={10} />
+                  </a>
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {c.failedEmails.length > 0 && (
         <div className="bg-white border border-stone-200 rounded-lg overflow-hidden">
           <PanelHead title={`Failed emails (${c.failedEmails.length})`}

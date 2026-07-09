@@ -43,6 +43,7 @@ export default function App() {
   const [apiKeyInput, setApiKeyInput] = useState(() => getApiKey());
   const [googleSignedIn, setGoogleSignedIn] = useState(() => isSignedIn());
   const [failedEmails, setFailedEmails] = useState([]);
+  const [unmatchedStatus, setUnmatchedStatus] = useState([]); // status emails with no matching order
   const [thumbSize, setThumbSize] = useState(() => Number(localStorage.getItem(THUMB_SIZE_KEY)) || THUMB_SIZE_DEFAULT);
   const [editingId, setEditingId] = useState(null);
   const [editDraft, setEditDraft] = useState(null);
@@ -61,8 +62,10 @@ export default function App() {
   const dataRef = useRef(null);             // latest data, for callbacks
   const syncingRef = useRef(false);
 
+  // 400 lines so a full Reconcile's failures don't scroll away; the log
+  // panel has a download button for offline inspection.
   const pushLog = (msg, kind = "info") =>
-    setLog((l) => [...l.slice(-40), { t: new Date().toLocaleTimeString(), msg, kind }]);
+    setLog((l) => [...l.slice(-400), { t: new Date().toLocaleTimeString(), msg, kind }]);
 
   useEffect(() => { dataRef.current = data; }, [data]);
   useEffect(() => { syncingRef.current = syncing; }, [syncing]);
@@ -495,6 +498,16 @@ export default function App() {
       } else {
         // Normal single-order email — one goods_list image and one
         // order_pay_info_row image with the full payment breakdown.
+        //
+        // Diagnostic: if this email has MULTIPLE goods_list sections but we
+        // couldn't read sub-order IDs out of it, it's a split email in a
+        // format extractSubOrders doesn't recognize — parsing it as a single
+        // order silently loses the other sub-orders (whose status emails
+        // then never match). Shout about it so it's debuggable.
+        const goodsSectionCount = extractAllSections(html, "goods_list").length;
+        if (goodsSectionCount > 1) {
+          pushLog(`⚠ Email ${em.id.slice(0, 10)}… has ${goodsSectionCount} item images but no readable sub-order IDs — split-email format not recognized; only the first order will be captured. Download the log and report this.`, "error");
+        }
         const goods = extractImgSrcs(extractSection(html, "goods_list")).filter((u) => /^https?:\/\//.test(u));
         const pay = extractImgSrcs(extractSection(html, "order_pay_info_row")).filter((u) => /^https?:\/\//.test(u));
         if (!goods.length) throw new Error("goods_list image not found in email HTML");
@@ -576,6 +589,54 @@ export default function App() {
       pushLog("Re-read complete.", "ok");
     } catch (e) {
       pushLog("Re-read failed: " + e.message, "error");
+    } finally {
+      setSyncing(false);
+    }
+  }, [syncing, data, save, processOrderEmail]);
+
+  /* ----- find & import ONE missing order by PO number -----
+     For unmatched status emails: their order was never created (usually a
+     split-email sub-order the parser missed). This searches Gmail for the
+     confirmation email containing that PO and force-parses it. */
+  const importMissingOrder = useCallback(async (po) => {
+    if (syncing || !po) return;
+    setSyncing(true);
+    cancelRequestedRef.current = false;
+    try {
+      const token = await getToken({ interactive: true });
+      setGoogleSignedIn(true);
+      pushLog(`Searching Gmail for ${po}'s order confirmation…`);
+      const msgs = await searchMessages(`from:transaction.temu.com "${po}"`, token, 10);
+      let found = null;
+      for (const m of msgs) {
+        const meta = await getMessageMetadata(m.id, token);
+        const subject = headerValue(meta, "Subject");
+        if (/orders? confirmation/i.test(subject)) {
+          found = {
+            id: m.id,
+            kind: "order",
+            orderId: extractPoNumber(subject),
+            date: headerValue(meta, "Date") ? new Date(headerValue(meta, "Date")).toISOString().slice(0, 10) : null,
+          };
+          break;
+        }
+      }
+      if (!found) {
+        pushLog(`No order-confirmation email containing ${po} was found (checked ${msgs.length} matches). Open Gmail and search "${po}" to see what exists.`, "warn");
+        return;
+      }
+      const working = { ...data, orders: [...data.orders], processedIds: [...data.processedIds] };
+      await processOrderEmail(found, token, working, { forceId: po });
+      if (working.orders.some((o) => o.id === po)) {
+        await save({ ...working });
+        setUnmatchedStatus((u) => u.filter((x) => x.oid !== po));
+        pushLog(`✓ ${po} imported — run Reconcile to re-apply its status emails.`, "ok");
+      } else {
+        await save({ ...working });
+        pushLog(`Read ${po}'s email but the order still didn't materialize — the split-email format likely isn't recognized. Download the log and report this email.`, "error");
+      }
+    } catch (e) {
+      pushLog("Import failed: " + e.message, "error");
     } finally {
       setSyncing(false);
     }
@@ -742,6 +803,8 @@ export default function App() {
           .filter((e) => e.kind !== "order" && (wide || !working.processedIds.includes(e.id)))
           .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
         if (wide && statusEmails.length) pushLog(`Re-applying ${statusEmails.length} status email(s) from history…`);
+        let statApplied = 0;
+        let statUnmatched = 0;
         for (const em of statusEmails) {
           if (cancelRequestedRef.current) { pushLog("Sync cancelled — stopping before next email.", "warn"); break; }
           let oid = em.orderId;
@@ -771,15 +834,23 @@ export default function App() {
                 target.orderUrl = extractOrderLink(html, target.id) || target.orderUrl;
               }
             }
+            statApplied++;
             pushLog(`✓ ${oid} → ${em.kind}${em.kind === "shipped" && target.eta ? ` (est. ${target.eta})` : ""}${em.kind === "shipped" && target.tracking?.carrier ? ` · ${target.tracking.carrier}` : ""}`, "ok");
             if (!working.processedIds.includes(em.id)) working.processedIds.push(em.id);
+            setUnmatchedStatus((u) => u.filter((x) => x.id !== em.id && x.oid !== oid));
           } else {
             // Deliberately NOT marked processed: if the order confirmation
             // failed to parse this run (or hasn't been read yet), marking
             // this processed would strand the order at "ordered" forever.
-            // Leaving it unprocessed lets a later Reconcile match it up.
-            pushLog(`Status email couldn't be matched to an order${oid ? ` (${oid})` : ""} — will retry on next Reconcile.`, "warn");
+            // Recorded in unmatchedStatus so the Review queue can show it
+            // and offer a targeted "find & import" of the missing order.
+            statUnmatched++;
+            pushLog(`✗ ${em.kind} email has no matching order${oid ? ` (${oid})` : " (no PO found in it)"} — see Needs review.`, "warn");
+            setUnmatchedStatus((u) => (u.some((x) => x.id === em.id) ? u : [...u, { id: em.id, oid: oid || null, kind: em.kind, date: em.date }]));
           }
+        }
+        if (statApplied || statUnmatched) {
+          pushLog(`Status pass: ${statApplied} applied, ${statUnmatched} unmatched${statUnmatched ? " — their orders are missing from the store (likely unparsed split-email sub-orders); use Needs review → Find & import" : ""}.`, statUnmatched ? "warn" : "ok");
         }
       }
 
@@ -850,6 +921,7 @@ export default function App() {
     syncing, sync, cancelSync,
     log, pushLog,
     failedEmails, retryFailedEmails, rereadOrder, testConnection,
+    unmatchedStatus, importMissingOrder,
     googleSignedIn, handleGoogleSignIn, handleGoogleSignOut,
     apiKeyInput, setApiKeyInput, saveApiKey,
     thumbSize, updateThumbSize,

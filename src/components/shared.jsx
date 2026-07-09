@@ -156,13 +156,30 @@ export function carrierEtaText(info) {
 
 export function LogPanel({ log, className = "" }) {
   if (!log.length) return null;
+  const errors = log.filter((l) => l.kind === "error" || l.kind === "warn").length;
+  const download = () => {
+    const text = log.map((l) => `${l.t} [${l.kind}] ${l.msg}`).join("\n");
+    const blob = new Blob([text], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `temu-sync-log-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
   return (
-    <div className={`bg-white border border-stone-300 rounded-sm p-2 max-h-36 overflow-y-auto mono text-[11px] ${className}`}>
-      {log.map((l, i) => (
-        <div key={i} className={l.kind === "error" ? "text-red-600" : l.kind === "warn" ? "text-amber-600" : l.kind === "ok" ? "text-emerald-700" : "text-stone-600"}>
-          {l.t} — {l.msg}
-        </div>
-      ))}
+    <div className={`relative bg-white border border-stone-300 rounded-sm ${className}`}>
+      <div className="flex items-center gap-2 px-2 pt-1.5 text-[10px] text-stone-400">
+        <span>{log.length} line(s){errors ? ` · ${errors} warning/error(s)` : ""}</span>
+        <button onClick={download} className="ml-auto font-semibold text-blue-600 hover:text-blue-500">↓ Download log</button>
+      </div>
+      <div className="p-2 pt-1 max-h-36 overflow-y-auto mono text-[11px]">
+        {log.map((l, i) => (
+          <div key={i} className={l.kind === "error" ? "text-red-600" : l.kind === "warn" ? "text-amber-600" : l.kind === "ok" ? "text-emerald-700" : "text-stone-600"}>
+            {l.t} — {l.msg}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

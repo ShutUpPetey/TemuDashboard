@@ -65,7 +65,7 @@ export default function MobileShell({ c }) {
       all: activeRows.length,
       byCat,
       transit: c.allItems.filter((r) => r.status === "shipped").length,
-      review: c.review.estimatedItems.length + c.review.emptyOrders.length + c.failedEmails.length,
+      review: c.review.estimatedItems.length + c.review.emptyOrders.length + c.failedEmails.length + c.unmatchedStatus.length,
     };
   }, [c.allItems, c.review, c.failedEmails]);
 
@@ -253,6 +253,27 @@ export default function MobileShell({ c }) {
               className="w-full flex items-center gap-2 bg-amber-50 border border-amber-300 text-amber-800 rounded-xl px-4 py-3 text-sm font-semibold">
               <RotateCcw size={14} /> Retry {c.failedEmails.length} failed email(s)
             </button>
+          )}
+          {c.unmatchedStatus.length > 0 && (
+            <div className="bg-white border border-amber-300 rounded-xl overflow-hidden">
+              <div className="px-4 py-2.5 text-[12px] font-bold text-amber-800 bg-amber-50 border-b border-amber-100">
+                {c.unmatchedStatus.length} status email(s) with no matching order
+              </div>
+              <div className="divide-y divide-stone-100">
+                {c.unmatchedStatus.map((u) => (
+                  <div key={u.id} className="flex items-center gap-2 px-4 py-2 text-[12.5px]">
+                    <StatusChip s={u.kind} />
+                    <span className="mono font-semibold truncate">{u.oid || "(no PO)"}</span>
+                    {u.oid && (
+                      <button onClick={() => c.importMissingOrder(u.oid)} disabled={c.syncing}
+                        className="ml-auto text-xs font-bold text-blue-600 disabled:opacity-40">
+                        Find &amp; import
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
           <div className="bg-white border border-stone-200 rounded-xl p-4">
             <SettingsPanel c={c} dark={false} />
