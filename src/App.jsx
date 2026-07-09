@@ -513,6 +513,8 @@ export default function App() {
         if (!goods.length) throw new Error("goods_list image not found in email HTML");
 
         const urls = [...goods, ...pay];
+        // Orders can run to 15-20+ items — the default 2000-token budget
+        // (anthropic.js) can truncate the JSON mid-response for a big one.
         const parsed = extractJSON(await callClaude([
           ...urls.map((u) => ({ type: "image", source: { type: "url", url: u } })),
           {
@@ -527,7 +529,7 @@ export default function App() {
               `"gi" = 0-based index of which items image the row is in; "y" = vertical center of that item's row within its image, as an integer percent (0=top, 100=bottom). ` +
               `"c" must be one of: ${CATEGORIES.join(", ")}.`,
           },
-        ]));
+        ], { maxTokens: 4000 }));
 
         const po = em.orderId || extractPoNumber(html) || em.id;
         const order = applyDiscounts({
@@ -689,6 +691,10 @@ export default function App() {
       }
       pushLog(`Re-reading ${orderId}'s real prices from its status email…`);
       const urls = [...goods, ...pay];
+      // Orders re-consolidated from a split-purchase sub-order can run to
+      // 15-20+ items — the default 2000-token budget (see anthropic.js)
+      // truncated the JSON mid-response for a real case like this. Full
+      // item + price + category JSON for a big order needs more headroom.
       const parsed = extractJSON(await callClaude([
         ...urls.map((u) => ({ type: "image", source: { type: "url", url: u } })),
         {
@@ -703,7 +709,7 @@ export default function App() {
             `"gi" = 0-based index of which items image the row is in; "y" = vertical center of that item's row within its image, as an integer percent (0=top, 100=bottom). ` +
             `"c" must be one of: ${CATEGORIES.join(", ")}.`,
         },
-      ]));
+      ], { maxTokens: 4000 }));
       const fixed = applyDiscounts({
         ...order,
         subtotal: parsed.subtotal ?? order.subtotal,
