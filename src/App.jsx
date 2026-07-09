@@ -642,6 +642,93 @@ export default function App() {
     }
   }, [syncing, data, save, processOrderEmail]);
 
+  /* ----- fix estimated prices using a status email's priced receipt -----
+     Split-order confirmation emails often can't show a per-item price (Temu
+     only gives the combined order total for the whole message), so those
+     items get an even-split estimate (see the fallback branch of
+     applyDiscounts). But EVERY later status email for that PO — shipped,
+     out-for-delivery, delivered — embeds the SAME goods_list + payment-
+     summary image pair as a normal single-order confirmation, and THAT copy
+     has real per-item prices. This finds one such email, re-runs the normal
+     (non-split) vision parse against its images, and replaces the order's
+     estimated items with the real numbers. Manual only (costs one vision
+     call) — triggered from the Review queue's "Estimated prices" list. The
+     result is marked manualEdit so a later re-read of the (still priceless)
+     split confirmation can't silently revert it back to an estimate. */
+  const fixEstimatedPrices = useCallback(async (orderId) => {
+    if (syncing) return;
+    const order = data.orders.find((o) => o.id === orderId);
+    if (!order) return;
+    setSyncing(true);
+    cancelRequestedRef.current = false;
+    try {
+      const token = await getToken({ interactive: true });
+      setGoogleSignedIn(true);
+      pushLog(`Looking for a shipped/delivered email for ${orderId} with real prices…`);
+      const msgs = await searchMessages(
+        `from:transaction.temu.com subject:(shipped OR delivered OR arrived OR "transferred to" OR delivery) "${orderId}"`,
+        token, 10
+      );
+      let html = null;
+      for (const m of msgs) {
+        try {
+          const fullMsg = await getMessageFull(m.id, token);
+          const h = extractHtml(fullMsg.payload);
+          if (extractSection(h, "goods_list") && extractSection(h, "order_pay_info_row")) { html = h; break; }
+        } catch { /* try next candidate */ }
+      }
+      if (!html) {
+        pushLog(`No status email with a priced receipt image was found for ${orderId}.`, "warn");
+        return;
+      }
+      const goods = extractImgSrcs(extractSection(html, "goods_list")).filter((u) => /^https?:\/\//.test(u));
+      const pay = extractImgSrcs(extractSection(html, "order_pay_info_row")).filter((u) => /^https?:\/\//.test(u));
+      if (!goods.length) {
+        pushLog(`Found a status email for ${orderId} but couldn't find its item image.`, "warn");
+        return;
+      }
+      pushLog(`Re-reading ${orderId}'s real prices from its status email…`);
+      const urls = [...goods, ...pay];
+      const parsed = extractJSON(await callClaude([
+        ...urls.map((u) => ({ type: "image", source: { type: "url", url: u } })),
+        {
+          type: "text",
+          text:
+            `The first ${goods.length} image(s) show the purchased items of a Temu order — one row per item: product photo on the left, then name, quantity, price. ` +
+            `The remaining ${pay.length} image(s) show the payment summary. ` +
+            `Respond with ONLY compact single-line JSON, no prose: ` +
+            `{"subtotal":0,"discount":0,"shipping":0,"tax":0,"total":0,` +
+            `"items":[{"n":"short name max 8 words","listed":0,"qty":1,"c":"cat","gi":0,"y":50}]}. ` +
+            `"discount" = sum of all discount/coupon/credit lines as a positive number; "total" = amount actually charged; use null for anything not visible. ` +
+            `"gi" = 0-based index of which items image the row is in; "y" = vertical center of that item's row within its image, as an integer percent (0=top, 100=bottom). ` +
+            `"c" must be one of: ${CATEGORIES.join(", ")}.`,
+        },
+      ]));
+      const fixed = applyDiscounts({
+        ...order,
+        subtotal: parsed.subtotal ?? order.subtotal,
+        discount: parsed.discount ?? order.discount,
+        shipping: parsed.shipping ?? order.shipping,
+        tax: parsed.tax ?? order.tax,
+        total: parsed.total ?? order.total,
+        items: (parsed.items || []).map((it) => ({
+          name: it.n, listed: it.listed, qty: it.qty || 1,
+          category: CATEGORIES.includes(it.c) ? it.c : "Other",
+          thumbUrl: goods[it.gi || 0] || goods[0] || null,
+          thumbY: Number.isFinite(it.y) ? Math.max(0, Math.min(100, it.y)) : null,
+        })),
+        images: urls,
+        manualEdit: true,
+      });
+      await save({ ...data, orders: data.orders.map((o) => (o.id === orderId ? fixed : o)) });
+      pushLog(`✓ ${orderId}: replaced estimated prices with real ones from its status email.`, "ok");
+    } catch (e) {
+      pushLog("Price fix failed: " + e.message, "error");
+    } finally {
+      setSyncing(false);
+    }
+  }, [syncing, data, save]);
+
   /* ----- retry just the emails that previously errored out -----
      Complements sync()'s existing "re-read previously-empty orders" logic:
      that one catches orders that were saved with 0 items (e.g. a truncated
@@ -721,16 +808,21 @@ export default function App() {
       for (const m of orderMsgs) {
         const meta = await getMessageMetadata(m.id, token);
         const subject = headerValue(meta, "Subject");
+        const hdr = headerValue(meta, "Date");
         emails.push({
           id: m.id,
           kind: "order",
-          date: headerValue(meta, "Date") ? new Date(headerValue(meta, "Date")).toISOString().slice(0, 10) : null,
+          // `at` keeps full timestamp precision for sorting; `date` stays
+          // day-only for storage/display (order.date, CSV export, etc).
+          at: hdr ? new Date(hdr).toISOString() : null,
+          date: hdr ? new Date(hdr).toISOString().slice(0, 10) : null,
           orderId: extractPoNumber(subject),
         });
       }
       for (const m of statusMsgs) {
         const meta = await getMessageMetadata(m.id, token);
         const subject = headerValue(meta, "Subject");
+        const hdr = headerValue(meta, "Date");
         // Order matters here: check cancel/refund/return before shipped/delivered.
         // "arrived" = delivered; bare "delivery" (e.g. "out for delivery",
         // "delivery update") falls through to shipped, which is correct.
@@ -741,7 +833,8 @@ export default function App() {
         emails.push({
           id: m.id,
           kind,
-          date: headerValue(meta, "Date") ? new Date(headerValue(meta, "Date")).toISOString().slice(0, 10) : null,
+          at: hdr ? new Date(hdr).toISOString() : null,
+          date: hdr ? new Date(hdr).toISOString().slice(0, 10) : null,
           orderId: extractPoNumber(subject),
         });
       }
@@ -778,7 +871,7 @@ export default function App() {
       const newOrders = [
         ...emails.filter((e) => e.kind === "order" && (!hasOrder(e.id) || isEmptyOrder(e.id) || (wide && !e.orderId))),
         ...retries,
-      ].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+      ].sort((a, b) => (a.at || a.date || "").localeCompare(b.at || b.date || ""));
       if (retries.length) pushLog(`Retrying ${retries.length} previously-empty order(s).`);
       for (let i = 0; i < newOrders.length; i++) {
         if (cancelRequestedRef.current) { pushLog("Sync cancelled — stopping before next email.", "warn"); break; }
@@ -799,9 +892,17 @@ export default function App() {
          body fetch, no vision calls — and idempotent, since oldest-first
          ordering means the newest status wins. */
       if (!cancelRequestedRef.current) {
+        // Sort by full timestamp (`at`), not day-only `date`: same-day status
+        // emails are common (e.g. "out for delivery" a few hours before
+        // "delivered"), and day-only precision left same-day entries in
+        // whatever order Gmail's search API happened to return them —
+        // occasionally applying an earlier-in-the-day "shipped"/"out for
+        // delivery" email AFTER that same day's "delivered" one and flipping
+        // the order back to shipped. `at` (full ISO timestamp) restores the
+        // real chronological order so the true latest status always wins.
         const statusEmails = emails
           .filter((e) => e.kind !== "order" && (wide || !working.processedIds.includes(e.id)))
-          .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+          .sort((a, b) => (a.at || a.date || "").localeCompare(b.at || b.date || ""));
         if (wide && statusEmails.length) pushLog(`Re-applying ${statusEmails.length} status email(s) from history…`);
         let statApplied = 0;
         let statUnmatched = 0;
@@ -934,7 +1035,7 @@ export default function App() {
     syncing, sync, cancelSync,
     log, pushLog,
     failedEmails, retryFailedEmails, rereadOrder, testConnection,
-    unmatchedStatus, importMissingOrder,
+    unmatchedStatus, importMissingOrder, fixEstimatedPrices,
     googleSignedIn, handleGoogleSignIn, handleGoogleSignOut,
     apiKeyInput, setApiKeyInput, saveApiKey,
     thumbSize, updateThumbSize,

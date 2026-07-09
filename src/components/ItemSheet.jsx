@@ -167,6 +167,15 @@ export default function ItemSheet({ c, it, onClose, onViewOrder, desktop = false
                 </button>
               </div>
               <button onClick={onClose} className="w-full mt-2 bg-stone-900 text-white rounded-xl py-2.5 text-sm font-bold">Done</button>
+              {it.estimated && (
+                <button
+                  onClick={() => { if (!c.syncing) c.fixEstimatedPrices(it.orderId); }}
+                  disabled={c.syncing}
+                  title="Re-reads a shipped/delivered email for this order, which carries the real priced receipt (split-order confirmations only have an even-split estimate). Costs one vision call."
+                  className="w-full mt-2 text-center text-[12px] font-semibold text-emerald-600 underline underline-offset-2 disabled:opacity-40">
+                  ≈ Estimated — try real prices from a status email
+                </button>
+              )}
               {order && (
                 <button
                   onClick={() => { if (!c.syncing && confirm(`Re-read ${order.id} from its email? Restores deleted items; keeps status.`)) { c.rereadOrder(order); onClose(); } }}

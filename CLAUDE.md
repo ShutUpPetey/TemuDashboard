@@ -107,9 +107,34 @@ eventTime, eventDesc, checkedAt, trackerId?/easypostId? }`.
   before its delivered follow-up. If still unmatched, the tracking number
   (when found) is carried into `unmatchedStatus` as `trackingNumber` and
   shown in the Review queue row for context.
+- **Same-day status ordering (`at` vs `date`)**: `order.date` / most sorts
+  historically stored day-only precision (`toISOString().slice(0,10)`),
+  which broke same-day sequencing — e.g. an "out-for-delivery" email
+  (bucketed as "shipped") and the "delivered" email a few hours later both
+  land on the same calendar day, and day-only sort left them in whatever
+  order Gmail's search API happened to return, sometimes applying the
+  earlier one AFTER the delivered one and flipping the order back to
+  "shipped". Email objects built in `sync()` now also carry `at` (full ISO
+  timestamp) used ONLY for sorting; `date` stays day-only for storage/
+  display. Fixed by a Reconcile once deployed.
 - **Order links**: the real Temu order page is the `cmsg_transit.html` /
   `_order_ticket=` link (`isOrderDetailLink`). Change-address links also contain
   the PO — that bug was fixed; stale stored links self-heal on click.
+- **Fixing estimated prices from a status email (`fixEstimatedPrices`)**:
+  split-order confirmation emails often have no per-item price (Temu only
+  gives the combined total), so those items get an even-split estimate.
+  BUT every later status email for that PO — shipped, out-for-delivery,
+  delivered — embeds the same `goods_list` + `order_pay_info_row` image
+  pair as a normal single-order confirmation, this time with real prices
+  (confirmed by inspecting an actual delivered-notification email's raw
+  HTML — the breakdown is an image, not scrapable text, but it IS a
+  fully-priced receipt). `fixEstimatedPrices(orderId)` searches for such a
+  status email, re-runs the normal (non-split) vision parse against its
+  images, and replaces the order's items/totals with the real numbers —
+  one vision call, manual-trigger only (Review queue "Try real prices" /
+  ItemSheet's "≈ Estimated" action), never automatic. Result is marked
+  `manualEdit` so it can't be silently reverted by a later re-read of the
+  (still priceless) split confirmation.
 - **Carrier → status promotion**: an effect in App.jsx auto-flips shipped →
   delivered when carrier data says Delivered.
 - **Thumbnails (CropThumb)**: receipt PNG is one tall image; crop math uses

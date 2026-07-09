@@ -679,7 +679,7 @@ function ReviewView({ c, goEditOrder }) {
         <div className="bg-white border border-stone-200 rounded-lg overflow-hidden">
           <PanelHead title={`Estimated prices (${estimatedItems.length})`} />
           <div className="px-4 py-2 text-[12.5px] text-stone-500 border-b border-stone-100">
-            From split-order emails with no per-item price — the order total was split evenly. Fix any that matter with the real prices.
+            From split-order emails with no per-item price — the order total was split evenly. <b>Try real prices</b> re-reads a shipped/delivered email for that order, which carries the real priced receipt (1 vision call); <b>Fix price</b> edits by hand.
           </div>
           <div className="divide-y divide-stone-100">
             {estimatedItems.map((it, i) => (
@@ -689,6 +689,10 @@ function ReviewView({ c, goEditOrder }) {
                   <div className="text-[13px] font-medium truncate">{it.name}</div>
                   <div className="mono text-[10.5px] text-stone-400">{it.orderId} · paid ≈{fmt(it.paid)}</div>
                 </div>
+                <button onClick={() => c.fixEstimatedPrices(it.orderId)} disabled={c.syncing}
+                  className="text-xs font-semibold text-emerald-600 hover:text-emerald-500 whitespace-nowrap disabled:opacity-40">
+                  Try real prices
+                </button>
                 <button onClick={() => goEditOrder(it.orderId)} disabled={c.syncing}
                   className="text-xs font-semibold text-blue-600 hover:text-blue-500 whitespace-nowrap disabled:opacity-40">
                   <Pencil size={11} className="inline -mt-0.5 mr-1" />Fix price
