@@ -150,21 +150,80 @@ export function extractPoNumber(text) {
   return m ? m[0] : null;
 }
 
-// Finds the "view/track your order" link in a Temu email — the URL that
-// opens this order's detail page on temu.com. Prefers a link that contains
-// this order's own PO number (split-order emails have one link per
-// sub-order), then any temu.com link that looks order/tracking-related.
+// PO number for a STATUS email whose subject didn't carry one. The body of a
+// split-purchase status email can mention SIBLING orders' POs, so "first PO
+// in the raw HTML" mis-attributes statuses. The tracking-button link carries
+// parent_order_sn=PO-... for exactly the order the email is about — prefer
+// that, fall back to the first PO in the visible text.
+export function extractPoFromBody(html) {
+  const m = (html || "").match(/parent_order_sn=(PO-[\d-]+)/i);
+  if (m) return m[1];
+  return extractPoNumber(stripTags(html || ""));
+}
+
+// Carrier tracking info from a Temu shipping email: the direct UPS/USPS/
+// FedEx link if present, plus the tracking number (recognized by carrier
+// number formats). Falls back to building the canonical tracking URL from
+// the number when only the number is present.
+export function extractTracking(html) {
+  const hrefs = [];
+  const re = /<a[^>]+href=["']([^"']+)["']/gi;
+  let m;
+  while ((m = re.exec(html || ""))) hrefs.push(m[1].replace(/&amp;/g, "&"));
+  const find = (host) => hrefs.find((u) => new RegExp(`^https?://[^/]*${host}`, "i").test(u));
+  let carrier = null;
+  let url = null;
+  if ((url = find("ups\\.com"))) carrier = "UPS";
+  else if ((url = find("usps\\.com"))) carrier = "USPS";
+  else if ((url = find("fedex\\.com"))) carrier = "FedEx";
+
+  const text = stripTags(html || "");
+  const number =
+    text.match(/\b(1Z[0-9A-Z]{16})\b/)?.[1] ||                        // UPS
+    text.match(/\b(9[2-5]\d{20,25})\b/)?.[1] ||                       // USPS
+    text.match(/tracking (?:number|no\.?|#)[:\s]*([A-Z0-9]{10,34})/i)?.[1] ||
+    null;
+  if (!carrier && number) {
+    carrier = number.startsWith("1Z") ? "UPS" : /^9[2-5]/.test(number) ? "USPS" : /^\d{12,15}$/.test(number) ? "FedEx" : null;
+  }
+  if (!url && number) {
+    if (carrier === "UPS") url = `https://www.ups.com/track?tracknum=${number}`;
+    else if (carrier === "USPS") url = `https://tools.usps.com/go/TrackConfirmAction?tLabels=${number}`;
+    else if (carrier === "FedEx") url = `https://www.fedex.com/fedextrack/?trknbr=${number}`;
+  }
+  return number || url ? { carrier, number, url } : null;
+}
+
+// The orange "view order / track" button in Temu emails links to
+// app.temu.com/cmsg_transit.html?..._order_ticket=...&parent_order_sn=PO-...
+// — that's the real order-detail link. Other links in the email (change
+// address, help, etc.) can ALSO contain the PO number, so matching by PO
+// alone picks wrong; the _order_ticket/cmsg_transit signature is what
+// identifies the right one.
+export function isOrderDetailLink(url) {
+  return /cmsg_transit\.html|_order_ticket=/i.test(url || "");
+}
+
+// Finds the order-detail link for this PO in a Temu email. Ranking:
+// 1) cmsg_transit/_order_ticket links carrying this PO (the orange button)
+// 2) any cmsg_transit/_order_ticket link (single-order emails)
+// 3) other temu.com links that look order-related and aren't address/account
 export function extractOrderLink(html, poId) {
   const hrefs = [];
   const re = /<a[^>]+href=["']([^"']+)["']/gi;
   let m;
   while ((m = re.exec(html || ""))) hrefs.push(m[1].replace(/&amp;/g, "&"));
-  const temu = hrefs.filter((u) => /^https?:\/\/[^/]*temu\.com/i.test(u) && !/unsubscribe|preference|privacy|support|help/i.test(u));
-  if (poId) {
-    const withPo = temu.find((u) => u.includes(poId));
-    if (withPo) return withPo;
-  }
-  return temu.find((u) => /order|track|logistic|parcel|package/i.test(u)) || null;
+  const temu = hrefs.filter(
+    (u) => /^https?:\/\/[^/]*temu\.com/i.test(u) && !/unsubscribe|preference|privacy|support|help|address/i.test(u)
+  );
+  const pool = poId ? temu.filter((u) => u.includes(poId)) : [];
+  const ranked = pool.length ? pool : temu;
+  return (
+    ranked.find((u) => isOrderDetailLink(u)) ||
+    temu.find((u) => isOrderDetailLink(u)) ||
+    ranked.find((u) => /order|track|logistic|parcel|package/i.test(u)) ||
+    null
+  );
 }
 
 // Pulls an estimated-arrival window out of an email's plain text, e.g.

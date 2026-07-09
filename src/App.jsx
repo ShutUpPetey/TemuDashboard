@@ -5,11 +5,11 @@ import { downloadCsv, itemsCsv, ordersCsv } from "./lib/exportCsv";
 import { applyDiscounts } from "./lib/discounts";
 import { callClaude, cancelCurrentCall, textOf, extractJSON, getApiKey, setApiKey } from "./lib/anthropic";
 import { getToken, getStoredToken, isSignedIn, signIn, signOut } from "./lib/gis";
-import { cloudConfigured, cloudSignIn, cloudSignOut, cloudGet, cloudSet, cloudSubscribe } from "./lib/firebase";
+import { cloudConfigured, cloudSignIn, cloudSignOut, cloudGet, cloudSet, cloudSubscribe, cloudSubscribeCarrier } from "./lib/firebase";
 import {
   searchMessages, getMessageMetadata, getMessageFull, headerValue,
   extractHtml, extractSection, extractAllSections, extractImgSrcs, extractPoNumber, extractSubOrders,
-  extractOrderLink, extractEta,
+  extractOrderLink, extractEta, isOrderDetailLink, extractPoFromBody, extractTracking,
 } from "./lib/gmail";
 import { buildStats, reviewQueue, inTransitOrders, isActiveStatus } from "./lib/derive";
 import { CATEGORIES, fmt, numOrNull, annotateThumbs, Lightbox, THUMB_SIZE_KEY, THUMB_SIZE_DEFAULT } from "./components/shared";
@@ -53,9 +53,11 @@ export default function App() {
      "unconfigured" = no VITE_FIREBASE_* env vars, feature invisible.
      "off" → "connecting" → "on" | "error" once configured. */
   const [cloudState, setCloudState] = useState(() => (cloudConfigured() ? "off" : "unconfigured"));
+  const [carrier, setCarrier] = useState({}); // trackingNumber → live 17TRACK info (from the GitHub Action)
   const cloudReadyRef = useRef(false);      // gate write-through in save()
   const cloudConnectingRef = useRef(false); // connect() is idempotent
   const cloudUnsubRef = useRef(null);
+  const cloudCarrierUnsubRef = useRef(null);
   const dataRef = useRef(null);             // latest data, for callbacks
   const syncingRef = useRef(false);
 
@@ -137,6 +139,10 @@ export default function App() {
           pushLog("Cloud: updated from another device.", "ok");
         } catch { /* malformed remote payload — ignore */ }
       });
+      // Live carrier ETAs (written by the scheduled GitHub Action) — read-only.
+      try {
+        cloudCarrierUnsubRef.current = await cloudSubscribeCarrier(setCarrier);
+      } catch { /* carrier data optional */ }
       cloudReadyRef.current = true;
       setCloudState("on");
     } catch (e) {
@@ -174,6 +180,8 @@ export default function App() {
     signOut();
     setGoogleSignedIn(false);
     if (cloudUnsubRef.current) { try { cloudUnsubRef.current(); } catch { /* noop */ } cloudUnsubRef.current = null; }
+    if (cloudCarrierUnsubRef.current) { try { cloudCarrierUnsubRef.current(); } catch { /* noop */ } cloudCarrierUnsubRef.current = null; }
+    setCarrier({});
     cloudReadyRef.current = false;
     cloudConnectingRef.current = false;
     cloudSignOut();
@@ -310,7 +318,11 @@ export default function App() {
   const openOrderPage = useCallback(async (order) => {
     const win = window.open("about:blank", "_blank");
     const nav = (url) => { if (win) win.location = url; else window.open(url, "_blank"); };
-    if (order.orderUrl) { nav(order.orderUrl); return; }
+    // Use the stored link only if it matches the real order-button signature
+    // (_order_ticket / cmsg_transit). Links cached by the older extractor
+    // could be the email's change-address link — treat those as stale and
+    // re-extract from the email, which self-heals the stored value.
+    if (order.orderUrl && isOrderDetailLink(order.orderUrl)) { nav(order.orderUrl); return; }
     try {
       if (order.messageId && isSignedIn()) {
         const token = await getToken({ interactive: false });
@@ -323,7 +335,8 @@ export default function App() {
           return;
         }
       }
-    } catch { /* fall through to Gmail search */ }
+    } catch { /* fall through */ }
+    if (order.orderUrl) { nav(order.orderUrl); return; } // better than nothing
     nav(`https://mail.google.com/mail/u/0/#search/${encodeURIComponent(order.id.startsWith("PO-") ? order.id : "from:temu.com " + order.id)}`);
   }, [data, save]);
 
@@ -619,7 +632,7 @@ export default function App() {
       // covering all of them — subject is plural ("Your Temu orders confirmation
       // on <date>") with no PO number at all, so it must be matched separately.
       const orderQuery = `from:transaction.temu.com subject:("order confirmation" OR "orders confirmation")${sinceClause}`;
-      const statusQuery = `from:transaction.temu.com subject:(delivered OR shipped OR "transferred to" OR cancel OR cancelled OR canceled OR refund OR return OR returned)${sinceClause}`;
+      const statusQuery = `from:transaction.temu.com subject:(delivered OR arrived OR shipped OR delivery OR "transferred to" OR cancel OR cancelled OR canceled OR refund OR return OR returned)${sinceClause}`;
 
       const [orderMsgs, statusMsgs] = await Promise.all([
         searchMessages(orderQuery, token),
@@ -641,9 +654,11 @@ export default function App() {
         const meta = await getMessageMetadata(m.id, token);
         const subject = headerValue(meta, "Subject");
         // Order matters here: check cancel/refund/return before shipped/delivered.
+        // "arrived" = delivered; bare "delivery" (e.g. "out for delivery",
+        // "delivery update") falls through to shipped, which is correct.
         const kind = /cancel/i.test(subject) ? "cancelled"
           : /refund|return/i.test(subject) ? "returned"
-          : /delivered/i.test(subject) ? "delivered"
+          : /delivered|arrived/i.test(subject) ? "delivered"
           : "shipped";
         emails.push({
           id: m.id,
@@ -695,23 +710,35 @@ export default function App() {
         await save({ ...working });
       }
 
-      /* 3 — status updates: shipped / delivered / cancelled / returned */
+      /* 3 — status updates: shipped / delivered / cancelled / returned.
+
+         Normal syncs skip already-processed status emails. A Reconcile
+         (wide) deliberately RE-APPLIES every status email in history:
+         older versions marked unmatched status emails as processed even
+         when their order didn't exist yet (classic case: split-email
+         sub-orders parsed after their delivered email), stranding orders
+         at "ordered" forever. Re-running is cheap — metadata + occasional
+         body fetch, no vision calls — and idempotent, since oldest-first
+         ordering means the newest status wins. */
       if (!cancelRequestedRef.current) {
         const statusEmails = emails
-          .filter((e) => e.kind !== "order" && !working.processedIds.includes(e.id))
+          .filter((e) => e.kind !== "order" && (wide || !working.processedIds.includes(e.id)))
           .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+        if (wide && statusEmails.length) pushLog(`Re-applying ${statusEmails.length} status email(s) from history…`);
         for (const em of statusEmails) {
           if (cancelRequestedRef.current) { pushLog("Sync cancelled — stopping before next email.", "warn"); break; }
           let oid = em.orderId;
           let html = null;
           // Fetch the body when the PO isn't in the subject (to find it), and
           // for shipped emails regardless — they carry the estimated-arrival
-          // window and a tracking link. Cheap regex work, no Claude call.
+          // window and the carrier tracking link. Cheap regex, no Claude call.
           if (!oid || em.kind === "shipped") {
             try {
               const fullMsg = await getMessageFull(em.id, token);
               html = extractHtml(fullMsg.payload);
-              if (!oid) oid = extractPoNumber(html);
+              // parent_order_sn in the tracking link is exact — the first-PO-
+              // in-raw-HTML approach could grab a SIBLING order's number.
+              if (!oid) oid = extractPoFromBody(html);
             } catch { /* skip */ }
           }
           const target = oid && working.orders.find((o) => o.id === oid);
@@ -720,10 +747,15 @@ export default function App() {
             if (html) {
               const eta = extractEta(html);
               if (eta) target.eta = eta;
-              if (!target.orderUrl) target.orderUrl = extractOrderLink(html, target.id);
+              const tracking = extractTracking(html);
+              if (tracking) target.tracking = tracking;
+              // Replace missing OR stale (pre-fix, wrong-anchor) links.
+              if (!isOrderDetailLink(target.orderUrl)) {
+                target.orderUrl = extractOrderLink(html, target.id) || target.orderUrl;
+              }
             }
-            pushLog(`✓ ${oid} → ${em.kind}${target.eta && em.kind === "shipped" ? ` (est. ${target.eta})` : ""}`, "ok");
-            working.processedIds.push(em.id);
+            pushLog(`✓ ${oid} → ${em.kind}${em.kind === "shipped" && target.eta ? ` (est. ${target.eta})` : ""}${em.kind === "shipped" && target.tracking?.carrier ? ` · ${target.tracking.carrier}` : ""}`, "ok");
+            if (!working.processedIds.includes(em.id)) working.processedIds.push(em.id);
           } else {
             // Deliberately NOT marked processed: if the order confirmation
             // failed to parse this run (or hasn't been read yet), marking
@@ -811,7 +843,7 @@ export default function App() {
     allItems, activeOrders, activeItems, stats, review, inTransit,
     lightbox, setLightbox,
     layoutOverride, setLayoutOverride,
-    cloudState,
+    cloudState, carrier,
   };
 
   return (

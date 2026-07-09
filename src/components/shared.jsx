@@ -120,6 +120,40 @@ export function Empty({ syncing }) {
   );
 }
 
+/* ---------- live carrier tracking (populated by the GitHub Action) ---------- */
+
+export const CARRIER_STATUS_LABEL = {
+  InfoReceived: "Label created",
+  InTransit: "In transit",
+  OutForDelivery: "Out for delivery",
+  AvailableForPickup: "Ready for pickup",
+  Delivered: "Delivered",
+  DeliveryFailure: "Delivery issue",
+  Exception: "Exception",
+  Expired: "Tracking expired",
+  NotFound: "Not found yet",
+};
+
+export function carrierInfoFor(carrierMap, order) {
+  const n = order?.tracking?.number;
+  return (n && carrierMap && carrierMap[n]) || null;
+}
+
+const shortDate = (iso) => {
+  if (!iso) return null;
+  const d = new Date(iso);
+  return isNaN(d) ? null : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+};
+
+/* "Jul 12" or "Jul 12 – Jul 14" from the carrier's estimated window. */
+export function carrierEtaText(info) {
+  if (!info) return null;
+  const a = shortDate(info.etaFrom);
+  const b = shortDate(info.etaTo);
+  if (a && b && a !== b) return `${a} – ${b}`;
+  return a || b || null;
+}
+
 export function LogPanel({ log, className = "" }) {
   if (!log.length) return null;
   return (

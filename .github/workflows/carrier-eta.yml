@@ -1,0 +1,34 @@
+name: Carrier ETA refresh
+
+# Polls 17TRACK for shipped orders' tracking numbers and writes live
+# ETAs/status into Firebase RTDB (manifest/{uid}/carrier/...), which the
+# app subscribes to. See scripts/carrier-eta.mjs and README → "Live
+# carrier ETAs" for the required secrets.
+
+on:
+  schedule:
+    - cron: "23 3,9,15,21 * * *" # every 6 hours (offset to avoid GH's busy :00)
+  workflow_dispatch: # manual "run now" from the Actions tab
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm install --no-save firebase-admin@^12
+
+      - run: node scripts/carrier-eta.mjs
+        env:
+          # Secrets (Settings → Secrets and variables → Actions → Secrets).
+          # Set ONE tracking provider key — Ship24 (personal email OK) or
+          # 17TRACK (business email required):
+          SHIP24_KEY: ${{ secrets.SHIP24_KEY }}
+          SEVENTEEN_TRACK_KEY: ${{ secrets.SEVENTEEN_TRACK_KEY }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          # Reuses the existing repo Variable from the Pages deploy:
+          FIREBASE_DATABASE_URL: ${{ vars.VITE_FIREBASE_DATABASE_URL }}

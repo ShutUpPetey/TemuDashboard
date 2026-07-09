@@ -7,11 +7,14 @@ import {
 import {
   CATEGORIES, STATUS_META, fmt, pct, isActiveStatus,
   StatusChip, CropThumb, annotateThumbs, Elapsed, Empty, LogPanel,
+  carrierInfoFor, carrierEtaText, CARRIER_STATUS_LABEL,
 } from "./shared";
-import { sparkPoints, monthDelta } from "../lib/derive";
+import { sparkPoints, monthDelta, siblingOrders } from "../lib/derive";
 import { etaEndDate } from "../lib/gmail";
 import SettingsPanel from "./SettingsPanel";
 import AnalyticsView from "./AnalyticsView";
+import ItemSheet from "./ItemSheet";
+import OrderSheet from "./OrderSheet";
 
 /* ============================================================
    Desktop shell — "Command Center". Persistent sidebar, Overview
@@ -25,16 +28,42 @@ export default function DesktopShell({ c }) {
   const [catFilter, setCatFilter] = useState("All");
   const [statusFilter, setStatusFilter] = useState("All");
   const [sort, setSort] = useState({ key: "date", dir: -1 });
+  const [sheetItem, setSheetItem] = useState(null);     // shared ItemSheet target
+  const [sheetOrderId, setSheetOrderId] = useState(null); // shared OrderSheet target
 
   const reviewCount = c.review.estimatedItems.length + c.review.emptyOrders.length + c.failedEmails.length;
   const delta = monthDelta(c.stats.monthData);
 
+  /* Open the order POPUP — the default way to view an order from anywhere
+     (overview rows, item order-links, related-order chips, item sheet). */
+  const openOrder = (orderId) => {
+    setSheetItem(null);
+    setSheetOrderId(orderId);
+  };
+
+  /* Jump to the order in the Orders LIST (expanded + scrolled) — used by
+     the popup's "Show in Orders" and the edit flow. */
+  const goOrder = (orderId) => {
+    setSheetItem(null);
+    setSheetOrderId(null);
+    setView("orders");
+    setExpanded((e) => ({ ...e, [orderId]: true }));
+    setTimeout(() => document.getElementById(`d-order-${orderId}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 150);
+  };
+
   const goEditOrder = (orderId) => {
     const order = c.data.orders.find((o) => o.id === orderId);
     if (!order) return;
-    setView("orders");
-    setExpanded((e) => ({ ...e, [orderId]: true }));
+    goOrder(orderId);
     if (!c.syncing) c.startEdit(order);
+  };
+
+  /* Analytics → filtered Items view */
+  const goItemsFiltered = ({ cat = "All", status = "All" } = {}) => {
+    setCatFilter(cat);
+    setStatusFilter(status);
+    c.setQuery("");
+    setView("items");
   };
 
   const filteredItems = useMemo(() => {
@@ -147,27 +176,44 @@ export default function DesktopShell({ c }) {
 
           <LogPanel log={c.log} className="mb-4" />
 
-          {view === "overview" && <Overview c={c} delta={delta} reviewCount={reviewCount} goView={setView} />}
-          {view === "orders" && <OrdersView c={c} expanded={expanded} setExpanded={setExpanded} />}
+          {view === "overview" && <Overview c={c} delta={delta} reviewCount={reviewCount} goView={setView} goOrder={openOrder} />}
+          {view === "orders" && <OrdersView c={c} expanded={expanded} setExpanded={setExpanded} goOrder={openOrder} openItem={setSheetItem} />}
           {view === "items" && (
             <ItemsView c={c} filteredItems={filteredItems} th={th}
               catFilter={catFilter} setCatFilter={setCatFilter}
-              statusFilter={statusFilter} setStatusFilter={setStatusFilter} />
+              statusFilter={statusFilter} setStatusFilter={setStatusFilter}
+              openItem={setSheetItem} goOrder={openOrder} />
           )}
-          {view === "analytics" && <div className="bg-white border border-stone-200 rounded-lg p-4"><AnalyticsView c={c} /></div>}
+          {view === "analytics" && (
+            <div className="bg-white border border-stone-200 rounded-lg p-4">
+              <AnalyticsView c={c}
+                onCategoryClick={(cat) => goItemsFiltered({ cat })}
+                onStatusClick={(status) => goItemsFiltered({ status })} />
+            </div>
+          )}
           {view === "review" && <ReviewView c={c} goEditOrder={goEditOrder} />}
           {view === "settings" && (
             <div className="bg-stone-900 rounded-lg p-5 max-w-3xl"><SettingsPanel c={c} dark /></div>
           )}
         </div>
       </main>
+
+      {sheetItem && <ItemSheet c={c} it={sheetItem} onClose={() => setSheetItem(null)} onViewOrder={openOrder} desktop />}
+      {sheetOrderId && (
+        <OrderSheet c={c} orderId={sheetOrderId} desktop
+          onClose={() => setSheetOrderId(null)}
+          onOpenItem={(row) => { setSheetOrderId(null); setSheetItem(row); }}
+          onOpenOrder={(id) => setSheetOrderId(id)}
+          onShowInList={goOrder}
+          onEdit={goEditOrder} />
+      )}
     </div>
   );
 }
 
 /* ================= Overview ================= */
 
-function Overview({ c, delta, reviewCount, goView }) {
+function Overview({ c, delta, reviewCount, goView, goOrder }) {
   const s = c.stats;
   const recent = [...c.data.orders].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 5);
   if (c.data.orders.length === 0) return <Empty syncing={c.syncing} />;
@@ -203,7 +249,7 @@ function Overview({ c, delta, reviewCount, goView }) {
           <table className="w-full text-sm">
             <tbody>
               {recent.map((o) => (
-                <tr key={o.id} className="border-b border-stone-100 last:border-0 hover:bg-orange-50/40 cursor-pointer" onClick={() => goView("orders")}>
+                <tr key={o.id} className="border-b border-stone-100 last:border-0 hover:bg-orange-50/40 cursor-pointer" title="Open this order" onClick={() => goOrder(o.id)}>
                   <td className="py-2 px-4 mono text-[12.5px] font-semibold">{o.id}</td>
                   <td className="py-2 pr-2 text-xs text-stone-500 whitespace-nowrap">{(o.date || "").slice(0, 10)}</td>
                   <td className="py-2 pr-2"><StatusChip s={o.status || "ordered"} /></td>
@@ -226,22 +272,36 @@ function Overview({ c, delta, reviewCount, goView }) {
                 .sort((a, b) => (etaEndDate(a.eta) || "9999").localeCompare(etaEndDate(b.eta) || "9999"))
                 .slice(0, 6).map((o) => {
                   const first = annotateThumbs(o.items || [])[0];
-                  const end = etaEndDate(o.eta);
-                  const overdue = end && end < new Date().toISOString().slice(0, 10);
+                  const info = carrierInfoFor(c.carrier, o);
+                  const liveEta = carrierEtaText(info);
+                  const end = etaEndDate(liveEta || o.eta);
+                  const overdue = !liveEta && end && end < new Date().toISOString().slice(0, 10);
                   return (
-                    <div key={o.id} className="flex items-center gap-3 px-4 py-2.5">
-                      {first ? <CropThumb url={first.thumbUrl} y={first.thumbY} rows={first.thumbRows} idx={first.thumbIdx} trustY={first.thumbTrustY} size={34} onClick={() => first.thumbUrl && c.setLightbox(first.thumbUrl)} /> : <Truck size={18} className="text-blue-500" />}
+                    <div key={o.id} className="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-orange-50/40 transition-colors"
+                      title="Open this order" onClick={() => goOrder(o.id)}>
+                      <span onClick={(e) => e.stopPropagation()}>
+                        {first ? <CropThumb url={first.thumbUrl} y={first.thumbY} rows={first.thumbRows} idx={first.thumbIdx} trustY={first.thumbTrustY} size={34} onClick={() => first.thumbUrl && c.setLightbox(first.thumbUrl)} /> : <Truck size={18} className="text-blue-500" />}
+                      </span>
                       <div className="min-w-0 flex-1">
                         <div className="text-[13px] font-medium truncate">{first?.name || o.id}</div>
                         <div className="mono text-[10.5px] text-stone-400">{o.id}{(o.items || []).length > 1 ? ` · +${o.items.length - 1} more` : ""}</div>
                       </div>
                       <div className="text-right">
-                        {o.eta
-                          ? <div className={`text-[11.5px] font-semibold ${overdue ? "text-amber-600" : "text-blue-700"}`}>{overdue ? "was due" : "est."} {o.eta}</div>
-                          : <div className="text-[11px] text-stone-400">ordered {(o.date || "").slice(5, 10)}</div>}
-                        <button onClick={() => c.openOrderPage(o)} title="Open order details on Temu in a new tab"
+                        {info?.status === "Delivered"
+                          ? <div className="text-[11.5px] font-semibold text-amber-600">✓ delivered per carrier</div>
+                          : liveEta
+                            ? <div className="text-[11.5px] font-semibold text-blue-700" title={info?.eventDesc || undefined}>
+                                est. {liveEta}
+                                {info?.status && CARRIER_STATUS_LABEL[info.status] && <span className="block text-[10px] font-medium text-stone-400">{CARRIER_STATUS_LABEL[info.status]}</span>}
+                              </div>
+                            : o.eta
+                              ? <div className={`text-[11.5px] font-semibold ${overdue ? "text-amber-600" : "text-blue-700"}`}>{overdue ? "was due" : "est."} {o.eta}</div>
+                              : <div className="text-[11px] text-stone-400">ordered {(o.date || "").slice(5, 10)}</div>}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); if (o.tracking?.url) window.open(o.tracking.url, "_blank"); else c.openOrderPage(o); }}
+                          title={o.tracking?.url ? `Open ${o.tracking.carrier || "carrier"} tracking${o.tracking.number ? ` (${o.tracking.number})` : ""}` : "Open order details on Temu"}
                           className="text-[11px] font-semibold text-blue-600 hover:text-blue-500 inline-flex items-center gap-0.5">
-                          Track <ExternalLink size={10} />
+                          {o.tracking?.carrier ? `Track · ${o.tracking.carrier}` : "Track"} <ExternalLink size={10} />
                         </button>
                       </div>
                     </div>
@@ -298,16 +358,21 @@ function PanelHead({ title, action }) {
 
 /* ================= Orders ================= */
 
-function OrdersView({ c, expanded, setExpanded }) {
+function OrdersView({ c, expanded, setExpanded, goOrder, openItem }) {
   if (c.data.orders.length === 0) return <Empty syncing={c.syncing} />;
   return (
     <div className="space-y-2">
       {[...c.data.orders].sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((o) => (
-        <div key={o.id} className={`border rounded-lg bg-white ${isActiveStatus(o.status) ? "border-stone-200" : "border-stone-200 bg-stone-50/60"}`}>
+        <div key={o.id} id={`d-order-${o.id}`} className={`border rounded-lg bg-white ${isActiveStatus(o.status) ? "border-stone-200" : "border-stone-200 bg-stone-50/60"}`}>
           <div className="flex flex-wrap items-center gap-2 px-3 py-2 cursor-pointer hover:bg-stone-50 rounded-lg"
             onClick={() => setExpanded((e) => ({ ...e, [o.id]: !e[o.id] }))}>
             {expanded[o.id] ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-            <span className={`mono text-sm font-semibold ${!isActiveStatus(o.status) ? "line-through text-stone-400" : ""}`}>{o.id}</span>
+            <button
+              onClick={(e) => { e.stopPropagation(); goOrder(o.id); }}
+              title="Open order details (popup)"
+              className={`mono text-sm font-semibold hover:text-orange-700 hover:underline underline-offset-2 transition-colors ${!isActiveStatus(o.status) ? "line-through text-stone-400" : ""}`}>
+              {o.id}
+            </button>
             <span className="text-xs text-stone-500">{(o.date || "").slice(0, 10)}</span>
             <StatusChip s={o.status || "ordered"} />
             {o.manualEdit && <span className="text-[10px] text-blue-500 border border-blue-300 rounded-sm px-1">edited</span>}
@@ -348,8 +413,10 @@ function OrdersView({ c, expanded, setExpanded }) {
                   <table className="w-full text-sm">
                     <tbody>
                       {annotateThumbs(o.items || []).map((it, i) => (
-                        <tr key={i} className="border-b border-stone-100 last:border-0">
-                          <td className="py-1 pr-2">
+                        <tr key={i} className="border-b border-stone-100 last:border-0 hover:bg-orange-50/40 cursor-pointer transition-colors"
+                          title="Open item details"
+                          onClick={() => openItem({ ...it, orderId: o.id, date: o.date, status: o.status || "ordered", itemIdx: i })}>
+                          <td className="py-1 pr-2" onClick={(e) => e.stopPropagation()}>
                             <CropThumb url={it.thumbUrl} y={it.thumbY} rows={it.thumbRows} idx={it.thumbIdx} trustY={it.thumbTrustY} size={c.thumbSize} onClick={() => it.thumbUrl && c.setLightbox(it.thumbUrl)} />
                           </td>
                           <td className="py-1 pr-2">{it.name} {it.qty > 1 && <span className="text-stone-400">×{it.qty}</span>}
@@ -370,6 +437,7 @@ function OrdersView({ c, expanded, setExpanded }) {
                     <span>tax {fmt(o.tax)}</span>
                     <span className="font-semibold text-stone-800">charged {fmt(o.total)}</span>
                   </div>
+                  <RelatedOrders c={c} order={o} goOrder={goOrder} />
                   {o.images?.length > 0 && (
                     <div className="flex gap-1 mt-2 flex-wrap">
                       {o.images.map((im, i) => (
@@ -382,6 +450,25 @@ function OrdersView({ c, expanded, setExpanded }) {
             </div>
           )}
         </div>
+      ))}
+    </div>
+  );
+}
+
+/* "Also from this email" chips — Temu split emails create several orders
+   from one message; this makes the family navigable in one click. */
+function RelatedOrders({ c, order, goOrder }) {
+  const sibs = siblingOrders(c.data.orders, order);
+  if (!sibs.length) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 mt-2 pt-2 border-t border-stone-100">
+      <span className="text-[10.5px] text-stone-400 uppercase tracking-wide">Same email:</span>
+      {sibs.map((s) => (
+        <button key={s.id} onClick={(e) => { e.stopPropagation(); goOrder(s.id); }}
+          title={`${(s.items || []).length} item(s) · ${fmt(s.total)} · ${s.status || "ordered"}`}
+          className="mono text-[11px] border border-stone-300 rounded-full px-2 py-0.5 text-stone-600 hover:border-orange-400 hover:text-orange-700 transition-colors">
+          {s.id}
+        </button>
       ))}
     </div>
   );
@@ -481,7 +568,7 @@ function EditForm({ c }) {
 
 /* ================= Items ================= */
 
-function ItemsView({ c, filteredItems, th, catFilter, setCatFilter, statusFilter, setStatusFilter }) {
+function ItemsView({ c, filteredItems, th, catFilter, setCatFilter, statusFilter, setStatusFilter, openItem, goOrder }) {
   return (
     <div className="bg-white border border-stone-200 rounded-lg p-3">
       <div className="flex flex-wrap gap-2 mb-3 items-center">
@@ -512,12 +599,19 @@ function ItemsView({ c, filteredItems, th, catFilter, setCatFilter, statusFilter
           </thead>
           <tbody>
             {filteredItems.map((it, i) => (
-              <tr key={i} className="border-b border-stone-100 hover:bg-orange-50/40">
-                <td className="py-1.5 pr-1">
+              <tr key={i} className="border-b border-stone-100 hover:bg-orange-50/40 cursor-pointer transition-colors"
+                title="Open item details" onClick={() => openItem(it)}>
+                <td className="py-1.5 pr-1" onClick={(e) => e.stopPropagation()}>
                   <CropThumb url={it.thumbUrl} y={it.thumbY} rows={it.thumbRows} idx={it.thumbIdx} trustY={it.thumbTrustY} size={c.thumbSize} onClick={() => it.thumbUrl && c.setLightbox(it.thumbUrl)} />
                 </td>
                 <td className="py-1.5 pr-2">{it.name}{it.qty > 1 && <span className="text-stone-400"> ×{it.qty}</span>}
-                  <div className="mono text-[10px] text-stone-400">{it.orderId}</div></td>
+                  <div>
+                    <button onClick={(e) => { e.stopPropagation(); goOrder(it.orderId); }}
+                      title="Jump to this order"
+                      className="mono text-[10px] text-stone-400 hover:text-blue-600 hover:underline underline-offset-2 transition-colors">
+                      {it.orderId}
+                    </button>
+                  </div></td>
                 <td className="py-1.5 pr-2 text-xs text-stone-500">{it.category}</td>
                 <td className="py-1.5 mono text-right text-stone-400 line-through">{it.estimated ? "" : fmt(it.listed)}</td>
                 <td className="py-1.5 mono text-right font-semibold">

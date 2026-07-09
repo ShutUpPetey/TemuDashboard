@@ -1,19 +1,24 @@
 import React, { useMemo, useState } from "react";
 import {
-  RefreshCw, Package, Search, X, Settings2, BarChart3, ReceiptText,
-  LayoutGrid, Pencil, Save, RotateCcw, AlertTriangle, ExternalLink,
+  RefreshCw, Search, Settings2, BarChart3, ReceiptText,
+  LayoutGrid, RotateCcw, AlertTriangle, ExternalLink,
 } from "lucide-react";
 import {
   CATEGORIES, fmt, pct, isActiveStatus, StatusChip, CropThumb, annotateThumbs, Elapsed, Empty, LogPanel,
+  carrierInfoFor, carrierEtaText,
 } from "./shared";
+import { siblingOrders } from "../lib/derive";
 import SettingsPanel from "./SettingsPanel";
 import AnalyticsView from "./AnalyticsView";
+import ItemSheet from "./ItemSheet";
+import OrderSheet from "./OrderSheet";
 import { useWindowWidth } from "../hooks/useMediaQuery";
 
 /* ============================================================
    Mobile shell — "Visual Gallery". Item-first card grid, chip
-   filters, tap-for-detail bottom sheet, floating stats dock.
-   All data + handlers come from ctx (`c`), built in App.jsx.
+   filters, tap-for-detail bottom sheet (shared ItemSheet), and a
+   floating stats dock. Everything cross-links: cards → sheet →
+   order → related orders → back to items.
    ============================================================ */
 
 const SORTS = [
@@ -27,9 +32,30 @@ export default function MobileShell({ c }) {
   const [chip, setChip] = useState("All");   // All | <category> | __transit | __review
   const [sortKey, setSortKey] = useState("date");
   const [sheet, setSheet] = useState(null);  // item row from allItems
+  const [sheetOrderId, setSheetOrderId] = useState(null); // OrderSheet target
   const [expandedOrder, setExpandedOrder] = useState(null);
   const winW = useWindowWidth();
   const cardSize = Math.floor((Math.min(winW, 520) - 16 * 2 - 12) / 2);
+
+  /* Open the order POPUP — default way to view an order from the item
+     sheet, related-order chips, etc. */
+  const openOrder = (orderId) => {
+    setSheet(null);
+    setSheetOrderId(orderId);
+  };
+
+  /* Jump to the order in the Orders LIST (expanded + scrolled) — used by
+     the popup's "Show in Orders". */
+  const goOrder = (orderId) => {
+    setSheet(null);
+    setSheetOrderId(null);
+    setView("orders");
+    setExpandedOrder(orderId);
+    setTimeout(() => document.getElementById(`m-order-${orderId}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 150);
+  };
+
+  const openItemFromOrder = (o, it, i) =>
+    setSheet({ ...it, orderId: o.id, date: o.date, status: o.status || "ordered", itemIdx: i });
 
   const counts = useMemo(() => {
     const activeRows = c.allItems.filter((r) => isActiveStatus(r.status));
@@ -93,7 +119,7 @@ export default function MobileShell({ c }) {
           <span className="disp font-extrabold text-[15px] tracking-tight">📦 TEMU <span className="text-orange-600">MANIFEST</span></span>
           <div className="relative flex-1 max-w-[220px] ml-auto">
             <Search size={13} className="absolute left-2.5 top-2 text-stone-400" />
-            <input value={c.query} onChange={(e) => c.setQuery(e.target.value)} placeholder={`Search ${counts.all}…`}
+            <input value={c.query} onChange={(e) => { c.setQuery(e.target.value); if (view !== "items") setView("items"); }} placeholder={`Search ${counts.all}…`}
               className="w-full pl-7 pr-2 py-1.5 bg-white border border-stone-200 rounded-full text-[13px] focus:outline-none focus:border-orange-400" />
           </div>
           <button onClick={() => c.sync(false)} disabled={c.syncing}
@@ -142,41 +168,82 @@ export default function MobileShell({ c }) {
       {view === "orders" && (
         <div className="px-4 pt-3 space-y-2">
           {c.data.orders.length === 0 ? <Empty syncing={c.syncing} /> :
-            [...c.data.orders].sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((o) => (
-              <div key={o.id} className="bg-white border border-stone-200 rounded-xl overflow-hidden">
-                <div className="flex items-center gap-2 px-3 py-2.5" onClick={() => setExpandedOrder(expandedOrder === o.id ? null : o.id)}>
-                  <div className="min-w-0">
-                    <div className={`mono text-[13px] font-semibold ${!isActiveStatus(o.status) ? "line-through text-stone-400" : ""}`}>{o.id}</div>
-                    <div className="text-[11px] text-stone-400">{(o.date || "").slice(0, 10)} · {(o.items || []).length} item{(o.items || []).length === 1 ? "" : "s"}</div>
-                  </div>
-                  <div className="ml-auto text-right">
-                    <div className="mono text-[14px] font-semibold">{fmt(o.total)}</div>
-                    <StatusChip s={o.status || "ordered"} />
-                    {o.status === "shipped" && o.eta && <div className="text-[10px] text-blue-600 font-semibold mt-0.5">est. {o.eta}</div>}
-                  </div>
-                </div>
-                {expandedOrder === o.id && (
-                  <div className="border-t border-stone-100 px-3 py-2">
-                    {annotateThumbs(o.items || []).map((it, i) => (
-                      <div key={i} className="flex items-center gap-2.5 py-1.5 border-b border-stone-50 last:border-0"
-                        onClick={() => setSheet({ ...it, orderId: o.id, date: o.date, status: o.status || "ordered", itemIdx: i })}>
-                        <CropThumb url={it.thumbUrl} y={it.thumbY} rows={it.thumbRows} idx={it.thumbIdx} trustY={it.thumbTrustY} size={38} rounded="rounded-lg" />
-                        <div className="min-w-0 flex-1 text-[13px]">{it.name} {it.qty > 1 && <span className="text-stone-400">×{it.qty}</span>}</div>
-                        <div className="mono text-[13px] font-semibold">{fmt(it.paid)}{it.estimated && <span className="text-amber-500">≈</span>}</div>
-                      </div>
-                    ))}
-                    <div className="mono text-[10.5px] text-stone-400 pt-2 flex flex-wrap gap-x-3">
-                      <span>sub {fmt(o.subtotal)}</span><span>disc −{fmt(o.discount)}</span><span>ship {fmt(o.shipping)}</span><span>tax {fmt(o.tax)}</span>
+            [...c.data.orders].sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((o) => {
+              const sibs = siblingOrders(c.data.orders, o);
+              const live = carrierInfoFor(c.carrier, o);
+              const liveEta = carrierEtaText(live);
+              return (
+                <div key={o.id} id={`m-order-${o.id}`}
+                  className={`bg-white border rounded-xl overflow-hidden transition-colors ${expandedOrder === o.id ? "border-orange-300" : "border-stone-200"}`}>
+                  <div className="flex items-center gap-2 px-3 py-2.5" onClick={() => setExpandedOrder(expandedOrder === o.id ? null : o.id)}>
+                    <div className="min-w-0">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); openOrder(o.id); }}
+                        className={`mono text-[13px] font-semibold active:text-orange-600 ${!isActiveStatus(o.status) ? "line-through text-stone-400" : "text-stone-900"}`}>
+                        {o.id}
+                      </button>
+                      <div className="text-[11px] text-stone-400">{(o.date || "").slice(0, 10)} · {(o.items || []).length} item{(o.items || []).length === 1 ? "" : "s"}{sibs.length > 0 && <span className="text-orange-500"> · split ×{sibs.length + 1}</span>}</div>
+                    </div>
+                    <div className="ml-auto text-right">
+                      <div className="mono text-[14px] font-semibold">{fmt(o.total)}</div>
+                      <StatusChip s={o.status || "ordered"} />
+                      {live?.status === "Delivered" && o.status === "shipped"
+                        ? <div className="text-[10px] text-amber-600 font-semibold mt-0.5">✓ delivered per carrier</div>
+                        : (liveEta || (o.status === "shipped" && o.eta))
+                          ? <div className="text-[10px] text-blue-600 font-semibold mt-0.5">est. {liveEta || o.eta}</div>
+                          : null}
                     </div>
                   </div>
-                )}
-              </div>
-            ))}
+                  {expandedOrder === o.id && (
+                    <div className="border-t border-stone-100 px-3 py-2">
+                      {annotateThumbs(o.items || []).map((it, i) => (
+                        <div key={i} className="flex items-center gap-2.5 py-1.5 border-b border-stone-50 last:border-0"
+                          onClick={() => openItemFromOrder(o, it, i)}>
+                          <CropThumb url={it.thumbUrl} y={it.thumbY} rows={it.thumbRows} idx={it.thumbIdx} trustY={it.thumbTrustY} size={38} rounded="rounded-lg" />
+                          <div className="min-w-0 flex-1 text-[13px]">{it.name} {it.qty > 1 && <span className="text-stone-400">×{it.qty}</span>}</div>
+                          <div className="mono text-[13px] font-semibold">{fmt(it.paid)}{it.estimated && <span className="text-amber-500">≈</span>}</div>
+                        </div>
+                      ))}
+                      <div className="mono text-[10.5px] text-stone-400 pt-2 flex flex-wrap gap-x-3">
+                        <span>sub {fmt(o.subtotal)}</span><span>disc −{fmt(o.discount)}</span><span>ship {fmt(o.shipping)}</span><span>tax {fmt(o.tax)}</span>
+                      </div>
+                      {sibs.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-1.5 pt-2 mt-1 border-t border-stone-100">
+                          <span className="text-[10.5px] text-stone-400 uppercase tracking-wide">Same email:</span>
+                          {sibs.map((s) => (
+                            <button key={s.id} onClick={(e) => { e.stopPropagation(); openOrder(s.id); }}
+                              className="mono text-[11px] border border-stone-300 rounded-full px-2 py-0.5 text-stone-600 hover:border-orange-400 hover:text-orange-700">
+                              {s.id}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <div className="flex gap-2 mt-2">
+                        <button onClick={(e) => { e.stopPropagation(); c.openOrderPage(o); }}
+                          className="flex-1 border border-orange-200 bg-orange-50 rounded-lg py-2 text-[12.5px] font-bold text-orange-700">
+                          <ExternalLink size={12} className="inline -mt-0.5 mr-1" />Open in Temu
+                        </button>
+                        {o.tracking?.url && (
+                          <button onClick={(e) => { e.stopPropagation(); window.open(o.tracking.url, "_blank"); }}
+                            className="flex-1 border border-blue-200 bg-blue-50 rounded-lg py-2 text-[12.5px] font-bold text-blue-700">
+                            🚚 Track · {o.tracking.carrier || "carrier"}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
         </div>
       )}
 
       {view === "analytics" && (
-        <div className="px-4 pt-3"><div className="bg-white border border-stone-200 rounded-xl p-3"><AnalyticsView c={c} /></div></div>
+        <div className="px-4 pt-3">
+          <div className="bg-white border border-stone-200 rounded-xl p-3">
+            <AnalyticsView c={c} onCategoryClick={(cat) => { setChip(cat); setView("items"); }} />
+          </div>
+        </div>
       )}
 
       {view === "settings" && (
@@ -198,8 +265,15 @@ export default function MobileShell({ c }) {
         </div>
       )}
 
-      {/* ---------- Detail sheet ---------- */}
-      {sheet && <DetailSheet c={c} it={sheet} onClose={() => setSheet(null)} />}
+      {/* ---------- Detail sheets (shared) ---------- */}
+      {sheet && <ItemSheet c={c} it={sheet} onClose={() => setSheet(null)} onViewOrder={openOrder} />}
+      {sheetOrderId && (
+        <OrderSheet c={c} orderId={sheetOrderId}
+          onClose={() => setSheetOrderId(null)}
+          onOpenItem={(row) => { setSheetOrderId(null); setSheet(row); }}
+          onOpenOrder={(id) => setSheetOrderId(id)}
+          onShowInList={goOrder} />
+      )}
 
       {/* ---------- Floating dock ---------- */}
       <nav className="fixed bottom-3 left-1/2 -translate-x-1/2 z-30 bg-stone-900 text-stone-200 rounded-2xl shadow-2xl shadow-black/40 px-3 pt-2.5 pb-2 w-[calc(100%-24px)] max-w-md">
@@ -259,149 +333,6 @@ function DockStat({ k, v, cls }) {
     <div className="text-center">
       <div className="text-[8.5px] uppercase tracking-widest text-stone-500 font-semibold">{k}</div>
       <div className={`mono text-[14px] font-semibold ${cls}`}>{v}</div>
-    </div>
-  );
-}
-
-/* ================= Detail sheet ================= */
-
-function DetailSheet({ c, it, onClose }) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState({ name: it.name || "", category: it.category || "Other", qty: it.qty || 1, listed: it.listed ?? "", paid: it.paid ?? "" });
-  const order = c.data.orders.find((o) => o.id === it.orderId);
-  const status = it.status || "ordered";
-  const cancelled = status === "cancelled" || status === "returned";
-  const steps = ["ordered", "shipped", "delivered"];
-  const reached = steps.indexOf(status);
-
-  const saveQuick = () => {
-    c.updateItem(it.orderId, it.itemIdx, draft);
-    setEditing(false);
-    onClose();
-  };
-
-  return (
-    <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/40" onClick={onClose}>
-      <div className="bg-white w-full max-w-md rounded-t-3xl overflow-hidden max-h-[88vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-        <div className="w-10 h-1 rounded-full bg-stone-300 mx-auto mt-2.5 mb-1" />
-        <div className="grid place-items-center py-3 bg-stone-50 border-b border-stone-100">
-          <CropThumb url={it.thumbUrl} y={it.thumbY} rows={it.thumbRows} idx={it.thumbIdx} trustY={it.thumbTrustY} size={132} rounded="rounded-xl" onClick={() => it.thumbUrl && c.setLightbox(it.thumbUrl)} />
-        </div>
-        <div className="px-5 pt-3.5 pb-6">
-          {editing ? (
-            <div className="space-y-2.5">
-              <input value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-                className="w-full border border-stone-300 rounded-lg px-2.5 py-2 text-[15px] font-semibold" />
-              <div className="grid grid-cols-3 gap-2 text-xs">
-                <label className="flex flex-col gap-1 text-stone-500">Qty
-                  <input type="number" min="1" value={draft.qty} onChange={(e) => setDraft((d) => ({ ...d, qty: e.target.value }))}
-                    className="border border-stone-300 rounded-lg px-2 py-1.5 text-sm text-stone-900" />
-                </label>
-                <label className="flex flex-col gap-1 text-stone-500">Listed $
-                  <input type="number" step="0.01" value={draft.listed} onChange={(e) => setDraft((d) => ({ ...d, listed: e.target.value }))}
-                    className="border border-stone-300 rounded-lg px-2 py-1.5 text-sm text-stone-900" />
-                </label>
-                <label className="flex flex-col gap-1 text-stone-500">Paid $
-                  <input type="number" step="0.01" value={draft.paid} onChange={(e) => setDraft((d) => ({ ...d, paid: e.target.value }))}
-                    className="border border-stone-300 rounded-lg px-2 py-1.5 text-sm text-stone-900" />
-                </label>
-              </div>
-              <label className="flex flex-col gap-1 text-xs text-stone-500">Category
-                <select value={draft.category} onChange={(e) => setDraft((d) => ({ ...d, category: e.target.value }))}
-                  className="border border-stone-300 rounded-lg px-2 py-2 text-sm bg-white text-stone-900">
-                  {CATEGORIES.map((cat) => <option key={cat}>{cat}</option>)}
-                </select>
-              </label>
-              <div className="flex gap-2 pt-1">
-                <button onClick={saveQuick} disabled={c.syncing}
-                  className="flex-1 bg-stone-900 text-white rounded-xl py-2.5 text-sm font-bold disabled:opacity-50">
-                  <Save size={13} className="inline -mt-0.5 mr-1" />Save
-                </button>
-                <button onClick={() => setEditing(false)} className="flex-1 border-2 border-stone-200 rounded-xl py-2.5 text-sm font-bold text-stone-600">Cancel</button>
-              </div>
-              {c.syncing && <div className="text-[11px] text-amber-600">Editing is locked while a sync runs.</div>}
-            </div>
-          ) : (
-            <>
-              <h3 className="text-[16px] font-bold leading-snug">{it.name || "—"} {it.qty > 1 && <span className="text-stone-400 font-normal">×{it.qty}</span>}</h3>
-
-              {cancelled ? (
-                <div className="mt-3"><StatusChip s={status} /> <span className="text-[11.5px] text-stone-400 ml-1">excluded from totals</span></div>
-              ) : (
-                <div className="flex items-center mt-4 mb-1">
-                  {steps.map((st, i) => (
-                    <React.Fragment key={st}>
-                      {i > 0 && <div className={`flex-1 h-0.5 ${i <= reached ? "bg-emerald-500" : "bg-stone-200"}`} />}
-                      <div className="flex flex-col items-center gap-1 px-1">
-                        <div className={`w-3 h-3 rounded-full ${i <= reached ? "bg-emerald-500" : "bg-stone-200"}`} />
-                        <span className={`text-[9.5px] font-semibold ${i <= reached ? "text-emerald-600" : st === "delivered" && order?.eta ? "text-blue-600" : "text-stone-400"}`}>
-                          {st[0].toUpperCase() + st.slice(1)}
-                          {st === "ordered" && it.date ? ` · ${it.date.slice(5, 10)}` : ""}
-                          {st === "delivered" && reached < 2 && order?.eta ? ` · est. ${order.eta}` : ""}
-                        </span>
-                      </div>
-                    </React.Fragment>
-                  ))}
-                </div>
-              )}
-
-              <div className="mt-3 divide-y divide-dashed divide-stone-200 text-[13.5px]">
-                <Row k="Order"><span className="mono">{it.orderId}</span></Row>
-                <Row k="Listed / paid">
-                  <span className="mono">
-                    {!it.estimated && it.listed != null && <s className="text-stone-400 mr-1.5">{fmt(it.listed)}</s>}
-                    <b>{fmt(it.paid)}</b>
-                    {it.estimated
-                      ? <span className="text-amber-600 font-semibold ml-1.5">≈ estimated</span>
-                      : it.discountPct > 0.005 && <span className="text-emerald-600 font-semibold ml-1.5">−{(it.discountPct * 100).toFixed(0)}%</span>}
-                  </span>
-                </Row>
-                <Row k="Category"><span className="mono">{it.category}</span></Row>
-                {order && (
-                  <Row k="Order totals">
-                    <span className="mono text-[12px]">{fmt(order.total)} charged{order.tax ? ` (incl. ${fmt(order.tax)} tax)` : ""}</span>
-                  </Row>
-                )}
-              </div>
-
-              <div className="grid grid-cols-2 gap-2 mt-4">
-                {order && (
-                  <button onClick={() => c.openOrderPage(order)}
-                    className="border-2 border-orange-200 bg-orange-50 rounded-xl py-2.5 text-sm font-bold text-orange-700">
-                    <ExternalLink size={13} className="inline -mt-0.5 mr-1" />Open in Temu
-                  </button>
-                )}
-                {it.thumbUrl && (
-                  <button onClick={() => c.setLightbox(it.thumbUrl)}
-                    className="border-2 border-stone-200 rounded-xl py-2.5 text-sm font-bold text-stone-600">🖼 Receipt</button>
-                )}
-                <button onClick={() => setEditing(true)} disabled={c.syncing}
-                  className="border-2 border-stone-200 rounded-xl py-2.5 text-sm font-bold text-stone-600 disabled:opacity-40">
-                  <Pencil size={13} className="inline -mt-0.5 mr-1" />Edit
-                </button>
-                <button onClick={onClose} className="bg-stone-900 text-white rounded-xl py-2.5 text-sm font-bold">Done</button>
-              </div>
-              {order && (
-                <button
-                  onClick={() => { if (!c.syncing && confirm(`Re-read ${order.id} from its email? Restores deleted items; keeps status.`)) { c.rereadOrder(order); onClose(); } }}
-                  disabled={c.syncing}
-                  className="w-full mt-2 text-center text-[12px] font-semibold text-stone-400 underline underline-offset-2 disabled:opacity-40">
-                  <RotateCcw size={11} className="inline -mt-0.5 mr-1" />Something missing? Re-read this order from its email
-                </button>
-              )}
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Row({ k, children }) {
-  return (
-    <div className="flex justify-between items-baseline py-2">
-      <span className="text-stone-500">{k}</span>
-      {children}
     </div>
   );
 }

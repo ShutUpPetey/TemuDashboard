@@ -43,6 +43,13 @@ export function inTransitOrders(orders) {
   return orders.filter((o) => (o.status || "ordered") === "shipped");
 }
 
+/* Orders that arrived in the SAME email as this one (Temu split-order
+   emails bundle several POs into one message) — they share a messageId. */
+export function siblingOrders(orders, order) {
+  if (!order?.messageId) return [];
+  return orders.filter((o) => o.messageId === order.messageId && o.id !== order.id);
+}
+
 /* Everything low-confidence that deserves a human look:
    - items whose price is an even split estimate (split-order emails)
    - orders that parsed with zero items (truncated vision response)

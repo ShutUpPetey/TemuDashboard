@@ -2,15 +2,20 @@ import React from "react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import { fmt, StatusChip, Empty } from "./shared";
 
-/* Analytics charts + tables — identical content on both shells. */
-export default function AnalyticsView({ c }) {
+/* Analytics charts + tables — identical content on both shells.
+   onCategoryClick / onStatusClick (optional) make the status tiles and
+   category rows navigate to a filtered Items view. */
+export default function AnalyticsView({ c, onCategoryClick, onStatusClick }) {
   const { stats, activeItems } = c;
   if (activeItems.length === 0) return <Empty syncing={c.syncing} />;
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap gap-2">
         {stats.statuses.map(([s, n]) => (
-          <div key={s} className="border border-stone-200 rounded-sm px-3 py-2 bg-white">
+          <div key={s}
+            onClick={onStatusClick ? () => onStatusClick(s) : undefined}
+            title={onStatusClick ? "Show these items" : undefined}
+            className={`border border-stone-200 rounded-sm px-3 py-2 bg-white ${onStatusClick ? "cursor-pointer hover:border-orange-300 hover:bg-orange-50/40 transition-colors" : ""}`}>
             <StatusChip s={s} /> <span className="mono text-lg font-semibold ml-2">{n}</span>
           </div>
         ))}
@@ -39,8 +44,11 @@ export default function AnalyticsView({ c }) {
           </thead>
           <tbody>
             {stats.catData.map((cat) => (
-              <tr key={cat.name} className="border-b border-stone-100 last:border-0">
-                <td className="py-1">{cat.name}</td>
+              <tr key={cat.name}
+                onClick={onCategoryClick ? () => onCategoryClick(cat.name) : undefined}
+                title={onCategoryClick ? `Show ${cat.name} items` : undefined}
+                className={`border-b border-stone-100 last:border-0 ${onCategoryClick ? "cursor-pointer hover:bg-orange-50/40 transition-colors" : ""}`}>
+                <td className={`py-1 ${onCategoryClick ? "text-blue-600" : ""}`}>{cat.name}</td>
                 <td className="py-1 mono text-right">{cat.qty}</td>
                 <td className="py-1 mono text-right">{fmt(cat.avgPerItem)}</td>
                 <td className="py-1 mono text-right font-semibold">{fmt(cat.spend)}</td>

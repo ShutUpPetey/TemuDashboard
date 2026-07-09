@@ -109,3 +109,13 @@ export async function cloudSubscribe(cb) {
   const { dbMod, ref } = await stateRef();
   return dbMod.onValue(ref, (snap) => cb(snap.exists() ? snap.val() : null));
 }
+
+/* Live carrier-tracking info written by the scheduled GitHub Action
+   (scripts/carrier-eta.mjs) — a map of trackingNumber → { status, etaFrom,
+   etaTo, eventDesc, ... }. The app only reads this path. */
+export async function cloudSubscribeCarrier(cb) {
+  const { app, dbMod } = await fb();
+  if (!uid) throw new Error("Cloud sync isn't signed in yet");
+  const ref = dbMod.ref(dbMod.getDatabase(app), `manifest/${uid}/carrier`);
+  return dbMod.onValue(ref, (snap) => cb(snap.exists() ? snap.val() : {}));
+}

@@ -112,6 +112,36 @@ unreachable, everything keeps working locally and the sync log says so. The
 Firebase SDK is loaded from Google's CDN only when configured — no new npm
 dependency.
 
+## Live carrier ETAs (optional, needs Cloud sync)
+
+Temu's shipping emails give a tracking number; this feature adds the
+carrier's OWN live estimated-delivery window and status ("Out for
+delivery"). Since browsers can't read carrier sites and API keys must stay
+secret, a scheduled GitHub Action (`.github/workflows/carrier-eta.yml` →
+`scripts/carrier-eta.mjs`) polls the [17TRACK API](https://api.17track.net/) every 6 hours and writes
+results into Firebase at `manifest/{uid}/carrier/…` — a read-only path the
+app subscribes to. Live ETAs take precedence over email ETAs everywhere,
+labeled "live via UPS". If the carrier reports delivered before Temu's
+email arrives, the app flags it ("✓ delivered per carrier").
+
+One-time setup (requires Cloud sync to be configured first). The worker is
+provider-agnostic — give it whichever key you can get:
+
+1. Pick a tracking provider:
+   - **Ship24** (personal email works): sign up free at [ship24.com](https://www.ship24.com/tracking-api), select the free plan in the dashboard, copy the API key. Free plan allows ~10 NEW shipments/month; re-polling existing ones is free. The worker prioritizes your newest shipments if quota runs short.
+   - **17TRACK** (requires a business email address): [features.17track.net/en/api](https://features.17track.net/en/api) — one-time 200 free registrations, key under Settings → Security → Access Key.
+2. Firebase console → Project settings → **Service accounts** → **Generate new private key** (downloads a JSON file).
+3. In the GitHub repo → Settings → Secrets and variables → Actions → **Secrets** (Secrets this time, not Variables — these are real credentials):
+   - `SHIP24_KEY` *or* `SEVENTEEN_TRACK_KEY` — the provider API key
+   - `FIREBASE_SERVICE_ACCOUNT` — the entire contents of the downloaded JSON file
+4. The workflow also reads the existing `VITE_FIREBASE_DATABASE_URL` repo Variable. Test it via Actions → "Carrier ETA refresh" → **Run workflow**, and check the run log.
+
+Quota notes: only orders currently in "shipped" status are polled, newest
+first; numbers the carrier reports delivered are dropped from polling; only
+NEW tracking numbers consume provider quota (polling costs nothing); at most
+10 new numbers are registered per run (override with the `MAX_NEW_PER_RUN`
+env in the workflow).
+
 ## Data & backups
 
 All order data lives in this browser's **IndexedDB** — nothing is synced to a
