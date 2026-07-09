@@ -124,23 +124,28 @@ app subscribes to. Live ETAs take precedence over email ETAs everywhere,
 labeled "live via UPS". If the carrier reports delivered before Temu's
 email arrives, the app flags it ("✓ delivered per carrier").
 
-One-time setup (requires Cloud sync to be configured first). The worker is
-provider-agnostic — give it whichever key you can get:
+One-time setup (requires Cloud sync to be configured first). Recommended
+provider: **Shippo** — API access is included on the free Starter plan, and
+tracking numbers not created through Shippo bill at **$0.01 per unique
+number** (charged once; polling is free). One key covers UPS, USPS, and
+FedEx. At personal Temu volume this is pennies per month.
 
-1. Pick a tracking provider:
-   - **Ship24** (personal email works): sign up free at [ship24.com](https://www.ship24.com/tracking-api), select the free plan in the dashboard, copy the API key. Free plan allows ~10 NEW shipments/month; re-polling existing ones is free. The worker prioritizes your newest shipments if quota runs short.
-   - **17TRACK** (requires a business email address): [features.17track.net/en/api](https://features.17track.net/en/api) — one-time 200 free registrations, key under Settings → Security → Access Key.
+1. Sign up at [goshippo.com](https://goshippo.com) (free Starter plan, add a card for usage billing) → Settings → **API** → copy the **Live token** (`shippo_live_…`) and set it as the `SHIPPO_KEY` secret.
 2. Firebase console → Project settings → **Service accounts** → **Generate new private key** (downloads a JSON file).
-3. In the GitHub repo → Settings → Secrets and variables → Actions → **Secrets** (Secrets this time, not Variables — these are real credentials):
-   - `SHIP24_KEY` *or* `SEVENTEEN_TRACK_KEY` — the provider API key
+3. In the GitHub repo → Settings → Secrets and variables → Actions → **Secrets** (Secrets, not Variables — these are real credentials):
+   - `SHIPPO_KEY` — the live token
    - `FIREBASE_SERVICE_ACCOUNT` — the entire contents of the downloaded JSON file
-4. The workflow also reads the existing `VITE_FIREBASE_DATABASE_URL` repo Variable. Test it via Actions → "Carrier ETA refresh" → **Run workflow**, and check the run log.
+4. The workflow also reads the existing `VITE_FIREBASE_DATABASE_URL` repo Variable. Test via Actions → "Carrier ETA refresh" → **Run workflow**, and check the run log.
 
-Quota notes: only orders currently in "shipped" status are polled, newest
-first; numbers the carrier reports delivered are dropped from polling; only
-NEW tracking numbers consume provider quota (polling costs nothing); at most
-10 new numbers are registered per run (override with the `MAX_NEW_PER_RUN`
-env in the workflow).
+Notes: only orders currently in "shipped" status are polled, newest first;
+numbers the carrier reports delivered are dropped from polling; each unique
+number is only ever billed once by the provider. The worker also has
+adapters for EasyPost (`EASYPOST_KEY`, $0.02–0.03/tracker), direct UPS/USPS
+developer APIs (`UPS_CLIENT_ID`/`UPS_CLIENT_SECRET`,
+`USPS_CLIENT_ID`/`USPS_CLIENT_SECRET`, free but painful signups), and
+Ship24/17TRACK (`SHIP24_KEY`/`SEVENTEEN_TRACK_KEY`, tight quotas). Adapters
+fall through in that order — whichever produces a result first wins, so
+partial credentials never break a run.
 
 ## Data & backups
 

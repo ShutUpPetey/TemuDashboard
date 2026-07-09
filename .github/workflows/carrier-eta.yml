@@ -25,8 +25,17 @@ jobs:
       - run: node scripts/carrier-eta.mjs
         env:
           # Secrets (Settings → Secrets and variables → Actions → Secrets).
-          # Set ONE tracking provider key — Ship24 (personal email OK) or
-          # 17TRACK (business email required):
+          # RECOMMENDED: Shippo — $0.01 per unique tracking number, API
+          # access on the free plan, sane signup:
+          SHIPPO_KEY: ${{ secrets.SHIPPO_KEY }}
+          # Alternative: EasyPost — $0.02–0.03 per tracker:
+          EASYPOST_KEY: ${{ secrets.EASYPOST_KEY }}
+          # Alternative: direct carrier APIs (free, but painful signup):
+          UPS_CLIENT_ID: ${{ secrets.UPS_CLIENT_ID }}
+          UPS_CLIENT_SECRET: ${{ secrets.UPS_CLIENT_SECRET }}
+          USPS_CLIENT_ID: ${{ secrets.USPS_CLIENT_ID }}
+          USPS_CLIENT_SECRET: ${{ secrets.USPS_CLIENT_SECRET }}
+          # Optional fallback for carriers other than UPS/USPS:
           SHIP24_KEY: ${{ secrets.SHIP24_KEY }}
           SEVENTEEN_TRACK_KEY: ${{ secrets.SEVENTEEN_TRACK_KEY }}
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
