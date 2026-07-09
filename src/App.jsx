@@ -1046,7 +1046,7 @@ export default function App() {
 
   const activeOrders = useMemo(() => data.orders.filter((o) => isActiveStatus(o.status || "ordered")), [data.orders]);
   const activeItems = useMemo(() => allItems.filter((i) => isActiveStatus(i.status)), [allItems]);
-  const stats = useMemo(() => buildStats(data.orders, activeOrders, activeItems), [data.orders, activeOrders, activeItems]);
+  const stats = useMemo(() => buildStats(data.orders, activeOrders, activeItems, carrier), [data.orders, activeOrders, activeItems, carrier]);
   const review = useMemo(() => reviewQueue(data.orders), [data.orders]);
   const inTransit = useMemo(() => inTransitOrders(data.orders), [data.orders]);
 
