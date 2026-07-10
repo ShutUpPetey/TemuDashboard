@@ -295,7 +295,7 @@ export default function MobileShell({ c }) {
 
       {view === "arriving" && (
         <div className="px-4 pt-3">
-          <ArrivingSoonView c={c} openItem={(it) => setSheet(it)} />
+          <ArrivingSoonView c={c} openItem={(it) => setSheet(it)} mobile />
         </div>
       )}
 

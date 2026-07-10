@@ -1,16 +1,22 @@
 import React, { useMemo } from "react";
-import { AlertTriangle, Clock } from "lucide-react";
+import { AlertTriangle, Clock, ChevronRight } from "lucide-react";
 import { fmt, STATUS_META, CropThumb, Empty, CARRIER_STATUS_LABEL } from "./shared";
 import { arrivingCalendar, isActiveStatus } from "../lib/derive";
 
 /* ============================================================
    "Arriving Soon" — a 14-day forward calendar of expected
    deliveries, plus a guarantee-overdue alert and a strip for
-   shipped items with no usable ETA at all. Same content on both
-   shells (like AnalyticsView); `openItem` swaps in the shared
+   shipped items with no usable ETA at all. Same underlying data on
+   both shells (like AnalyticsView); `openItem` swaps in the shared
    ItemSheet, exactly the way ItemsView/OrdersView do.
-   ============================================================ */
-export default function ArrivingSoonView({ c, openItem }) {
+
+   Desktop gets the 7-column grid; `mobile` swaps in a grouped
+   card list instead — a 7-column grid has no room to actually show
+   what's arriving on a phone-width screen, so mobile groups the
+   same `calendar` data by day (skipping empty days entirely, unlike
+   the grid which needs every day for its fixed layout) and renders
+   full-width tap targets. */
+export default function ArrivingSoonView({ c, openItem, mobile = false }) {
   const { calendar, overdueItems, noEstimateItems } = useMemo(
     () => arrivingCalendar(c.data.orders, c.carrier, 14),
     [c.data.orders, c.carrier]
@@ -36,18 +42,28 @@ export default function ArrivingSoonView({ c, openItem }) {
 
   return (
     <div className="space-y-4">
-      {/* Stat strip */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatTile label="Items arriving" value={String(itemsArriving)} sub={`next ${calendar.length} days`} />
-        <StatTile label="Orders in transit" value={String(c.inTransit.length)} valueCls="text-blue-700" />
-        <StatTile label="Value in transit" value={fmt(valueInTransit)} valueCls="text-orange-700" />
-        <StatTile
-          label="Past guarantee"
-          value={String(overdueItems.length)}
-          valueCls={overdueItems.length ? "text-red-600" : ""}
-          warn={overdueItems.length > 0}
-        />
-      </div>
+      {/* Stat strip — a horizontally-scrollable pill row on mobile (vertical
+          space is scarce above a long list); a 4-up grid on desktop. */}
+      {mobile ? (
+        <div className="flex gap-2 overflow-x-auto pb-0.5 -mx-4 px-4">
+          <StatPill label="Arriving" value={String(itemsArriving)} />
+          <StatPill label="In transit" value={String(c.inTransit.length)} />
+          <StatPill label="Value" value={fmt(valueInTransit)} />
+          <StatPill label="Overdue" value={String(overdueItems.length)} warn={overdueItems.length > 0} />
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <StatTile label="Items arriving" value={String(itemsArriving)} sub={`next ${calendar.length} days`} />
+          <StatTile label="Orders in transit" value={String(c.inTransit.length)} valueCls="text-blue-700" />
+          <StatTile label="Value in transit" value={fmt(valueInTransit)} valueCls="text-orange-700" />
+          <StatTile
+            label="Past guarantee"
+            value={String(overdueItems.length)}
+            valueCls={overdueItems.length ? "text-red-600" : ""}
+            warn={overdueItems.length > 0}
+          />
+        </div>
+      )}
 
       {/* Guarantee alert banner */}
       {overdueItems.length > 0 && (
@@ -81,14 +97,18 @@ export default function ArrivingSoonView({ c, openItem }) {
         </div>
       )}
 
-      {/* 14-day calendar grid */}
-      <div className="bg-white border border-stone-200 rounded-lg overflow-hidden">
-        <div className="grid grid-cols-7">
-          {calendar.map((day) => (
-            <DayCell key={day.date} day={day} today={day.date === todayStr} openItem={openItem} setLightbox={c.setLightbox} />
-          ))}
+      {/* 14-day calendar grid (desktop) / grouped day list (mobile) */}
+      {mobile ? (
+        <DayList calendar={calendar} todayStr={todayStr} openItem={openItem} setLightbox={c.setLightbox} />
+      ) : (
+        <div className="bg-white border border-stone-200 rounded-lg overflow-hidden">
+          <div className="grid grid-cols-7">
+            {calendar.map((day) => (
+              <DayCell key={day.date} day={day} today={day.date === todayStr} openItem={openItem} setLightbox={c.setLightbox} />
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* No estimate yet strip */}
       {noEstimateItems.length > 0 && (
@@ -120,6 +140,86 @@ function StatTile({ label, value, valueCls = "", sub, warn = false }) {
       <div className={`text-[10px] uppercase tracking-widest font-semibold ${warn ? "text-red-500" : "text-stone-500"}`}>{label}</div>
       <div className={`mono text-2xl font-semibold mt-1 ${valueCls}`}>{value}</div>
       {sub && <div className="text-[11.5px] text-stone-500 mt-0.5">{sub}</div>}
+    </div>
+  );
+}
+
+function StatPill({ label, value, warn = false }) {
+  return (
+    <div className={`shrink-0 rounded-xl border px-3.5 py-2 min-w-[84px] ${warn ? "bg-red-50 border-red-300" : "bg-white border-stone-200"}`}>
+      <div className={`text-[9px] uppercase tracking-widest font-semibold ${warn ? "text-red-500" : "text-stone-500"}`}>{label}</div>
+      <div className={`mono text-base font-semibold mt-0.5 ${warn ? "text-red-600" : ""}`}>{value}</div>
+    </div>
+  );
+}
+
+/* Mobile: one card per day that actually has something (no empty-day
+   placeholders — those only exist to keep the desktop grid's columns
+   aligned). Groups today..+13d, skipping empty days. */
+function DayList({ calendar, todayStr, openItem, setLightbox }) {
+  const days = calendar.filter((d) => d.items.length > 0);
+  if (!days.length) {
+    return (
+      <div className="bg-white border border-stone-200 rounded-xl p-6 text-center text-sm text-stone-400">
+        Nothing else expected in the next {calendar.length} days.
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-4">
+      {days.map((day) => (
+        <div key={day.date}>
+          <DayGroupLabel date={day.date} todayStr={todayStr} count={day.items.length} />
+          <div className="space-y-2">
+            {day.items.map((it, i) => (
+              <MobileItemCard key={i} it={it} onOpen={() => openItem(it)} onZoom={() => it.thumbUrl && setLightbox(it.thumbUrl)} />
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DayGroupLabel({ date, todayStr, count }) {
+  const d = new Date(date + "T00:00:00");
+  const diffDays = Math.round((d - new Date(todayStr + "T00:00:00")) / 86400000);
+  const label = diffDays === 0 ? "Today" : diffDays === 1 ? "Tomorrow"
+    : d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  return (
+    <div className="flex items-baseline gap-2 px-0.5 mb-1.5">
+      <span className={`text-[12px] font-extrabold uppercase tracking-wide ${diffDays === 0 ? "text-orange-600" : "text-stone-700"}`}>{label}</span>
+      {count > 1 && <span className="text-[11px] text-stone-400">{count} items</span>}
+      <span className="flex-1 h-px bg-stone-200" />
+    </div>
+  );
+}
+
+/* Full-width tap-target card — same overdue/stale badge convention as
+   CalendarItem below, just sized for touch instead of a 44px grid cell. */
+function MobileItemCard({ it, onOpen, onZoom }) {
+  const delivered = it.carrierStatus === "Delivered";
+  const dotKey = delivered ? "delivered" : it.status;
+  const dotCls = STATUS_META[dotKey]?.dot || STATUS_META.ordered.dot;
+  const statusLabel = it.carrierStatus ? (CARRIER_STATUS_LABEL[it.carrierStatus] || it.carrierStatus) : (it.status === "shipped" ? "Shipped" : "Ordered");
+  return (
+    <div onClick={onOpen} className="flex items-center gap-3 bg-white border border-stone-200 rounded-2xl px-3 py-2.5 cursor-pointer active:scale-[.98] transition-transform">
+      <div className="relative shrink-0">
+        <CropThumb url={it.thumbUrl} y={it.thumbY} rows={it.thumbRows} idx={it.thumbIdx} trustY={it.thumbTrustY} size={52} onClick={(e) => { e.stopPropagation(); onZoom(); }} />
+        {it.stale && (
+          <span className="absolute -bottom-1 -right-1 w-[18px] h-[18px] rounded-full bg-white border-2 border-amber-500 grid place-items-center text-amber-600" title="Tracking stale">
+            <Clock size={9} />
+          </span>
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="text-[13.5px] font-semibold truncate">{it.name || it.orderId}</div>
+        <div className="flex items-center gap-1.5 text-[11px] text-stone-500 mt-0.5">
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotCls}`} />
+          {statusLabel}{it.stale ? " · tracking stale" : ""}
+        </div>
+      </div>
+      <ChevronRight size={16} className="text-stone-300 shrink-0" />
     </div>
   );
 }
