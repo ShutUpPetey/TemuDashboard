@@ -1,5 +1,5 @@
 import React, { useMemo } from "react";
-import { AlertTriangle, Clock, ChevronRight } from "lucide-react";
+import { AlertTriangle, Clock, ChevronRight, CheckCircle2 } from "lucide-react";
 import { fmt, STATUS_META, CropThumb, Empty, CARRIER_STATUS_LABEL } from "./shared";
 import { arrivingCalendar, isActiveStatus } from "../lib/derive";
 
@@ -17,7 +17,7 @@ import { arrivingCalendar, isActiveStatus } from "../lib/derive";
    the grid which needs every day for its fixed layout) and renders
    full-width tap targets. */
 export default function ArrivingSoonView({ c, openItem, mobile = false }) {
-  const { calendar, overdueItems, noEstimateItems } = useMemo(
+  const { calendar, overdueItems, noEstimateItems, recentlyDelivered } = useMemo(
     () => arrivingCalendar(c.data.orders, c.carrier, 14),
     [c.data.orders, c.carrier]
   );
@@ -130,8 +130,39 @@ export default function ArrivingSoonView({ c, openItem, mobile = false }) {
           </div>
         </div>
       )}
+
+      {/* Recently delivered — closes the loop on items that were just
+          arriving/overdue/stale instead of them simply vanishing from the
+          view the moment they're marked delivered. */}
+      {recentlyDelivered.length > 0 && (
+        <div className="bg-white border border-stone-200 rounded-lg overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-stone-200 flex items-center gap-1.5">
+            <CheckCircle2 size={14} className="text-emerald-600" />
+            <h2 className="disp text-[13px] font-extrabold uppercase tracking-wide text-stone-600">
+              Recently delivered ({recentlyDelivered.length})
+            </h2>
+          </div>
+          <div className="flex flex-wrap gap-2 p-3">
+            {recentlyDelivered.map((it, i) => (
+              <button key={i} onClick={() => openItem(it)}
+                className="inline-flex items-center gap-2 bg-emerald-50/60 border border-emerald-200 rounded-full pl-1 pr-3 py-1 hover:border-emerald-400 transition-colors max-w-full">
+                <CropThumb url={it.thumbUrl} y={it.thumbY} rows={it.thumbRows} idx={it.thumbIdx} trustY={it.thumbTrustY} size={24} rounded="rounded-full" />
+                <span className="text-[12px] font-medium truncate max-w-[160px]">{it.name || it.orderId}</span>
+                <span className="text-[10.5px] text-emerald-700 whitespace-nowrap">{daysAgoLabel(it.deliveredAt)}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+function daysAgoLabel(iso) {
+  const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+  if (days <= 0) return "today";
+  if (days === 1) return "1d ago";
+  return `${days}d ago`;
 }
 
 function StatTile({ label, value, valueCls = "", sub, warn = false }) {

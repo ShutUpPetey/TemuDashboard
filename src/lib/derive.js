@@ -57,10 +57,24 @@ export function inTransitOrders(orders) {
    back to the parsed email ETA text when there's no carrier record yet. */
 const STALE_HOURS = 48;
 const CARRIER_ACTIVE_STATUSES = ["InTransit", "OutForDelivery", "AvailableForPickup"];
+const RECENT_DAYS = 7;
 
 function asDay(d) {
   const dt = d instanceof Date ? d : new Date(d);
   return isNaN(dt) ? null : dt.toISOString().slice(0, 10);
+}
+
+/* No status-change history is kept anywhere in the data model (orders only
+   store their CURRENT status — same limitation noted on deliveryDaysFor
+   further down), so "when was this delivered" is a proxy, same precedence
+   used there: the carrier's own eventTime when we have one, else the
+   order's own updatedAt (stamped whenever the carrier-promote effect or a
+   status email flips it to delivered — see App.jsx), else its order date. */
+function deliveredAtFor(order, carrierMap) {
+  const info = order.tracking?.number && carrierMap ? carrierMap[order.tracking.number] : null;
+  if (info?.status === "Delivered" && info.eventTime) return new Date(info.eventTime);
+  if (order.updatedAt) return new Date(order.updatedAt);
+  return order.date ? new Date(order.date) : null;
 }
 
 /* Buckets every non-delivered, non-cancelled/returned item onto a 14-day
@@ -75,7 +89,10 @@ function asDay(d) {
    - noEstimateItems: shipped items with no carrier data and no parseable
      email ETA at all (can't be placed on the calendar). "ordered" items
      with no ETA yet are NOT included here — they simply haven't shipped,
-     which isn't a gap worth flagging. */
+     which isn't a gap worth flagging.
+   - recentlyDelivered: delivered items from the last RECENT_DAYS days
+     (newest first), so items that were arriving/overdue can be seen
+     resolving instead of just disappearing from the view once delivered. */
 export function arrivingCalendar(orders, carrierMap = {}, days = 14) {
   const start = new Date();
   start.setHours(0, 0, 0, 0);
@@ -90,11 +107,23 @@ export function arrivingCalendar(orders, carrierMap = {}, days = 14) {
 
   const overdueItems = [];
   const noEstimateItems = [];
+  const recentlyDelivered = [];
+  const recentCutoff = Date.now() - RECENT_DAYS * 86400e3;
 
   for (const o of orders) {
     const status = o.status || "ordered";
-    if (status === "delivered" || !isActiveStatus(status)) continue;
     const info = (o.tracking?.number && carrierMap[o.tracking.number]) || null;
+
+    if (status === "delivered") {
+      const deliveredAt = deliveredAtFor(o, carrierMap);
+      if (deliveredAt && !isNaN(deliveredAt) && deliveredAt.getTime() >= recentCutoff) {
+        annotateThumbs(o.items || []).forEach((it, itemIdx) => {
+          recentlyDelivered.push({ ...it, orderId: o.id, date: o.date, status, itemIdx, deliveredAt: deliveredAt.toISOString() });
+        });
+      }
+      continue;
+    }
+    if (!isActiveStatus(status)) continue;
     const delivered = info?.status === "Delivered";
 
     annotateThumbs(o.items || []).forEach((it, itemIdx) => {
@@ -121,11 +150,13 @@ export function arrivingCalendar(orders, carrierMap = {}, days = 14) {
       if (windowSet.has(expected)) perDay[expected].push(full);
     });
   }
+  recentlyDelivered.sort((a, b) => b.deliveredAt.localeCompare(a.deliveredAt));
 
   return {
     calendar: dayList.map((date) => ({ date, items: perDay[date] })),
     overdueItems,
     noEstimateItems,
+    recentlyDelivered,
   };
 }
 
