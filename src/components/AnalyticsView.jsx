@@ -1,6 +1,7 @@
-import React from "react";
+import React, { useMemo, useState } from "react";
 import { AreaChart, Area, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import { fmt, pct, StatusChip, Empty, CropThumb } from "./shared";
+import { spendByPeriod, analyticsItemKey } from "../lib/derive";
 
 /* Fixed categorical hue per status — matches STATUS_META's dot colors in
    shared.jsx, so a "shipped" bar here is the same blue as a shipped chip
@@ -18,6 +19,26 @@ const monthLabel = (m) => {
   const d = new Date(+y, +mo - 1, 1);
   return isNaN(d) ? m : d.toLocaleDateString(undefined, { month: "short", year: "numeric" });
 };
+
+/* Stock-chart-style period toggle for "Spend over time" — day/week/month/
+   year buckets of ACTIVE orders' charged totals (spendByPeriod, order-level
+   by design — see its comment in lib/derive.js). */
+const PERIODS = [
+  { key: "day", label: "D" },
+  { key: "week", label: "W" },
+  { key: "month", label: "M" },
+  { key: "year", label: "Y" },
+];
+
+function periodLabel(name, period) {
+  if (!name || name === "?") return "Unknown";
+  if (period === "year") return name;
+  if (period === "month") return monthLabel(name);
+  const d = new Date(name);
+  if (isNaN(d)) return name;
+  const short = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return period === "week" ? `Wk of ${short}` : short;
+}
 
 function HeroTile({ label, value, sub }) {
   return (
@@ -54,6 +75,15 @@ function Callout({ label, primary, sub }) {
    category rows navigate to a filtered Items view. */
 export default function AnalyticsView({ c, onCategoryClick, onStatusClick }) {
   const { stats: s, activeItems } = c;
+  const [period, setPeriod] = useState("month");
+  const periodData = useMemo(() => spendByPeriod(c.activeOrders, period), [c.activeOrders, period]);
+  const periodDelta = useMemo(() => {
+    if (periodData.length < 2) return null;
+    const cur = periodData[periodData.length - 1];
+    const prev = periodData[periodData.length - 2];
+    return { cur: cur.spend, prev: prev.spend, diff: cur.spend - prev.spend };
+  }, [periodData]);
+
   if (activeItems.length === 0) return <Empty syncing={c.syncing} loaded={c.loaded} />;
 
   const funnelRows = [
@@ -89,12 +119,29 @@ export default function AnalyticsView({ c, onCategoryClick, onStatusClick }) {
         ))}
       </div>
 
-      {/* ---------- spend over time ---------- */}
+      {/* ---------- spend over time (stock-chart style, D/W/M/Y) ---------- */}
       <section>
-        <h3 className="disp font-bold text-sm uppercase tracking-wide text-stone-600 mb-2">Spend over time (monthly, charged $)</h3>
+        <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+          <h3 className="disp font-bold text-sm uppercase tracking-wide text-stone-600">Spend over time (charged $)</h3>
+          <div className="flex items-center gap-2">
+            {periodDelta && (
+              <span className={`mono text-xs font-semibold ${periodDelta.diff > 0 ? "text-orange-700" : periodDelta.diff < 0 ? "text-emerald-700" : "text-stone-400"}`}>
+                {periodDelta.diff > 0 ? "▲" : periodDelta.diff < 0 ? "▼" : "–"} {fmt(Math.abs(periodDelta.diff))} vs prior {period}
+              </span>
+            )}
+            <div className="flex border border-stone-200 rounded-sm overflow-hidden">
+              {PERIODS.map((p) => (
+                <button key={p.key} type="button" onClick={() => setPeriod(p.key)}
+                  className={`px-2.5 py-1 text-xs font-semibold mono transition-colors ${period === p.key ? "bg-orange-600 text-white" : "bg-white text-stone-500 hover:bg-stone-50"}`}>
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
         <div className="h-56">
           <ResponsiveContainer>
-            <AreaChart data={s.monthData}>
+            <AreaChart data={periodData}>
               <defs>
                 <linearGradient id="spendFill" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor="#ea580c" stopOpacity={0.35} />
@@ -102,9 +149,9 @@ export default function AnalyticsView({ c, onCategoryClick, onStatusClick }) {
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" vertical={false} />
-              <XAxis dataKey="name" tickFormatter={monthLabel} tick={{ fontSize: 11 }} />
+              <XAxis dataKey="name" tickFormatter={(v) => periodLabel(v, period)} tick={{ fontSize: 11 }} />
               <YAxis tick={{ fontSize: 11 }} />
-              <Tooltip labelFormatter={monthLabel} formatter={(v, k) => (k === "spend" ? fmt(v) : v)} />
+              <Tooltip labelFormatter={(v) => periodLabel(v, period)} formatter={(v, k) => (k === "spend" ? fmt(v) : v)} />
               <Area type="monotone" dataKey="spend" stroke="#ea580c" strokeWidth={2} fill="url(#spendFill)" dot={{ r: 3, fill: "#ea580c", strokeWidth: 0 }} activeDot={{ r: 5 }} />
             </AreaChart>
           </ResponsiveContainer>
@@ -161,7 +208,7 @@ export default function AnalyticsView({ c, onCategoryClick, onStatusClick }) {
         <h3 className="disp font-bold text-sm uppercase tracking-wide text-stone-600 mb-2">Top items by spend</h3>
         <div className="border border-stone-200 rounded-lg divide-y divide-stone-100 bg-white">
           {s.topItems.map((it, i) => (
-            <div key={`${it.orderId}-${i}`} className="flex items-center gap-3 px-3 py-2">
+            <div key={`${it.orderId}-${i}`} className="flex items-center gap-3 px-3 py-2 group">
               <span className="mono text-xs text-stone-400 w-4 text-right">{i + 1}</span>
               <CropThumb url={it.thumbUrl} y={it.thumbY} rows={it.thumbRows} idx={it.thumbIdx} trustY={it.thumbTrustY} size={32}
                 onClick={() => it.thumbUrl && c.setLightbox(it.thumbUrl)} />
@@ -170,10 +217,68 @@ export default function AnalyticsView({ c, onCategoryClick, onStatusClick }) {
                 <div className="mono text-[10.5px] text-stone-400">{it.orderId} · {it.category}{it.qty > 1 ? ` · ×${it.qty}` : ""}</div>
               </div>
               <div className="mono text-sm font-semibold text-right shrink-0">{fmt(it.amount)}</div>
+              {c.toggleIgnoreAnalyticsItem && (
+                <button type="button" onClick={() => c.toggleIgnoreAnalyticsItem(analyticsItemKey(it))}
+                  title="Ignore this item in analytics"
+                  className="shrink-0 text-[11px] px-2 py-1 rounded-sm border border-stone-200 text-stone-400 opacity-0 group-hover:opacity-100 hover:border-red-300 hover:text-red-600 hover:bg-red-50 transition-all">
+                  Ignore
+                </button>
+              )}
             </div>
           ))}
         </div>
       </section>
+
+      {/* ---------- ignored items ---------- */}
+      {c.ignoredAnalyticsItems && c.ignoredAnalyticsItems.length > 0 && (
+        <section>
+          <h3 className="disp font-bold text-sm uppercase tracking-wide text-stone-600 mb-2">
+            Ignored from analytics <span className="text-stone-400 normal-case font-normal">({c.ignoredAnalyticsItems.length})</span>
+          </h3>
+          <div className="border border-dashed border-stone-300 rounded-lg divide-y divide-stone-100 bg-stone-50/60">
+            {c.ignoredAnalyticsItems.map((it, i) => (
+              <div key={`${it.orderId}-${i}`} className="flex items-center gap-3 px-3 py-2 opacity-70">
+                <CropThumb url={it.thumbUrl} y={it.thumbY} rows={it.thumbRows} idx={it.thumbIdx} trustY={it.thumbTrustY} size={28}
+                  onClick={() => it.thumbUrl && c.setLightbox(it.thumbUrl)} />
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13px] font-medium truncate">{it.name}</div>
+                  <div className="mono text-[10.5px] text-stone-400">{it.orderId} · {it.category}{it.qty > 1 ? ` · ×${it.qty}` : ""}</div>
+                </div>
+                <div className="mono text-sm font-semibold text-right shrink-0 text-stone-500">{fmt(it.amount)}</div>
+                <button type="button" onClick={() => c.toggleIgnoreAnalyticsItem(analyticsItemKey(it))}
+                  className="shrink-0 text-[11px] px-2 py-1 rounded-sm border border-stone-300 text-stone-600 hover:border-orange-300 hover:text-orange-700 hover:bg-orange-50 transition-colors">
+                  Restore
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className="text-[11px] text-stone-400 mt-1">Excluded from spend/category/price stats above — still visible everywhere else in the app.</div>
+        </section>
+      )}
+
+      {/* ---------- free items received ---------- */}
+      {c.receivedFreeItems && c.receivedFreeItems.length > 0 && (
+        <section>
+          <h3 className="disp font-bold text-sm uppercase tracking-wide text-stone-600 mb-2">
+            Free items received <span className="text-stone-400 normal-case font-normal">({c.receivedFreeItems.length})</span>
+          </h3>
+          <div className="border border-emerald-200 rounded-lg divide-y divide-emerald-100 bg-emerald-50/40">
+            {c.receivedFreeItems.map((it, i) => (
+              <div key={`${it.orderId}-${i}`} className="flex items-center gap-3 px-3 py-2">
+                <CropThumb url={it.thumbUrl} y={it.thumbY} rows={it.thumbRows} idx={it.thumbIdx} trustY={it.thumbTrustY} size={32}
+                  onClick={() => it.thumbUrl && c.setLightbox(it.thumbUrl)} />
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13px] font-medium truncate">{it.name}</div>
+                  <div className="mono text-[10.5px] text-stone-400">{it.orderId} · {it.category}{it.qty > 1 ? ` · ×${it.qty}` : ""}</div>
+                </div>
+                <div className="mono text-sm font-semibold text-right shrink-0 text-emerald-700">
+                  FREE{it.listed ? <span className="text-stone-400 font-normal"> · was {fmt(it.listed)}</span> : ""}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* ---------- order status funnel ---------- */}
       <section>

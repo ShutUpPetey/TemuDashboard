@@ -29,9 +29,10 @@ from later status emails, a two-tier review split between genuinely-estimated
 split-order prices and single-item orders whose paid amount is exact but list
 price is unknown, an "Arriving Soon" 14-day delivery calendar with
 past-guarantee/stale-tracking flags, a much-expanded Analytics tab (KPIs,
-spend trend, carrier performance, funnel, price histogram), a first-run
-Welcome tour, and optional multi-user admin oversight (directory + read-only
-"view as user").
+a D/W/M/Y stock-chart-style spend-over-time toggle, per-item "ignore from
+analytics" with a restore list, a free-items-received list, carrier
+performance, funnel, price histogram), a first-run Welcome tour, and
+optional multi-user admin oversight (directory + read-only "view as user").
 
 **2026-07-10 multi-agent review:** `IMPROVEMENTS.md` (repo root) is the ranked
 issue/improvement tracker produced by parallel UI/UX, architecture, and
@@ -249,6 +250,30 @@ Firebase sign-in.
   prices AND no usable total (e.g. a split email whose per-sub-order total
   failed to extract), items get `paid: null` + `estimated: true` instead of
   the old silent, unflagged $0.00.
+- **Analytics: spend-over-time period toggle, per-item ignore, free items
+  (`AnalyticsView.jsx` + `lib/derive.js`)**: `spendByPeriod(orders, period)`
+  buckets ACTIVE ORDERS' charged totals by day/week/month/year for a
+  stock-chart-style D/W/M/Y toggle — deliberately order-level (a "week"
+  bucket sums `order.total`), so it's unaffected by the item-level ignore
+  list below. The "ignore from analytics" feature (an "Ignore" button on
+  each Top Items row) is a per-device, localStorage-only preference
+  (`temu-analytics-ignore-v1`, keyed by `analyticsItemKey()` =
+  `orderId:itemIdx`) — NOT synced to Firebase/IndexedDB and NOT written to
+  order data, since it's a view preference ("this one gift skews my spend
+  stats"), not a fact about the order. App.jsx filters `activeItems` down to
+  `analyticsItems` (ignored items removed) before calling `buildStats()`, so
+  every ITEM-driven stat (top items, category spend, price histogram,
+  saved/avg-discount) respects the ignore list — but `buildStats()` is still
+  called with the full `activeOrders`, so ORDER-driven stats (hero "Total
+  spent", funnel, carrier performance, delivery time) do NOT change when an
+  item is ignored — both are intentionally exempt (a $150 gift's ORDER still
+  cost $150; ignoring it from the item breakdown doesn't rewrite what was
+  actually charged). A
+  separate "Ignored from analytics" section lists ignored items with a
+  Restore button. `freeItems()` (also `lib/derive.js`) lists delivered items
+  priced at exactly `paid === 0` with `listed > 0` — i.e. genuinely
+  coupon/credit-covered per the `ba5db1c` discount-factor-clamp fix, not
+  merely estimated-as-zero.
 - **Unified search + filter/sort (`lib/derive.js`: `matchesQuery`,
   `itemSearchIndex`, `orderSearchIndex`)**: the single search box (shared
   state, `c.query`) now matches across BOTH Items and Orders views in both

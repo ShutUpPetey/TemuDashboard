@@ -259,6 +259,48 @@ export function orderSearchIndex(o) {
   ]);
 }
 
+/* ---------- Spend over time, stock-chart style (day/week/month/year) ----------
+   Buckets ACTIVE orders' charged totals — deliberately order-level, not
+   item-level, so toggling an item out of analytics (see analyticsItemKey
+   below) never moves this chart: an order's charged total is a financial
+   fact independent of which of ITS items get excluded from the item-level
+   breakdowns (top items, category spend, price histogram). */
+function periodKey(dateStr, period) {
+  if (!dateStr) return "?";
+  if (period === "year") return dateStr.slice(0, 4);
+  if (period === "month") return dateStr.slice(0, 7);
+  const d = new Date(dateStr);
+  if (isNaN(d)) return "?";
+  d.setHours(0, 0, 0, 0);
+  if (period === "week") d.setDate(d.getDate() - d.getDay()); // back to Sunday
+  return d.toISOString().slice(0, 10);
+}
+
+export function spendByPeriod(orders, period = "month") {
+  const byKey = {};
+  const byKeyCount = {};
+  orders.forEach((o) => {
+    const k = periodKey(o.date, period);
+    byKey[k] = (byKey[k] || 0) + (o.total || 0);
+    byKeyCount[k] = (byKeyCount[k] || 0) + 1;
+  });
+  return Object.entries(byKey)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, v]) => ({ name, spend: +v.toFixed(2), count: byKeyCount[name] || 0 }));
+}
+
+/* Stable per-item key for the "ignore from analytics" toggle — an item has
+   no id of its own, only its position within its order. */
+export const analyticsItemKey = (it) => `${it.orderId}:${it.itemIdx}`;
+
+/* Items priced at exactly $0.00 (a coupon/credit fully covered the order —
+   see applyDiscounts' factor clamp in lib/discounts.js) that have actually
+   arrived. "Free" here means genuinely $0 charged, not merely estimated;
+   listed > 0 excludes degenerate zero/zero rows. */
+export function freeItems(items) {
+  return items.filter((it) => it.status === "delivered" && it.paid === 0 && (it.listed || 0) > 0);
+}
+
 /* "▲ $212 this month" style delta for the charged KPI: current calendar
    month's spend vs the previous calendar month's. */
 export function monthDelta(monthData) {

@@ -11,7 +11,7 @@ import {
   extractHtml, extractSection, extractAllSections, extractImgSrcs, extractPoNumber, extractSubOrders,
   extractOrderLink, extractEta, isOrderDetailLink, extractPoFromBody, extractTracking,
 } from "./lib/gmail";
-import { buildStats, reviewQueue, inTransitOrders, isActiveStatus } from "./lib/derive";
+import { buildStats, reviewQueue, inTransitOrders, isActiveStatus, analyticsItemKey, freeItems } from "./lib/derive";
 import { mergeState, remoteIsStale, sameOrderSet } from "./lib/syncMerge";
 import { CATEGORIES, fmt, numOrNull, annotateThumbs, Lightbox, THUMB_SIZE_KEY, THUMB_SIZE_DEFAULT } from "./components/shared";
 import { useLayoutMode } from "./hooks/useMediaQuery";
@@ -35,6 +35,11 @@ import WelcomeModal from "./components/WelcomeModal";
 
 const STORAGE_KEY = "temu-manifest-v1";
 const WELCOME_SEEN_KEY = "temu-manifest-welcome-seen-v1";
+// Per-device, analytics-only "ignore this item" list (e.g. a one-off
+// expensive gift that skews spend stats) — deliberately local-only like
+// thumbSize, not synced to Firebase or IndexedDB: it's a view preference,
+// not order data, and never hides the item anywhere outside Analytics.
+const ANALYTICS_IGNORE_KEY = "temu-analytics-ignore-v1";
 // The one Google account allowed to see the admin directory / "view as"
 // panel — everyone else's manifest/{uid} subtree is invisible to them per
 // the Firebase rules in README → "Admin access". Unset = admin view is
@@ -54,6 +59,9 @@ export default function App() {
   const [failedEmails, setFailedEmails] = useState([]);
   const [unmatchedStatus, setUnmatchedStatus] = useState([]); // status emails with no matching order
   const [thumbSize, setThumbSize] = useState(() => Number(localStorage.getItem(THUMB_SIZE_KEY)) || THUMB_SIZE_DEFAULT);
+  const [ignoredAnalytics, setIgnoredAnalytics] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(ANALYTICS_IGNORE_KEY) || "[]"); } catch { return []; }
+  });
   const [editingId, setEditingId] = useState(null);
   const [editDraft, setEditDraft] = useState(null);
   const cancelRequestedRef = useRef(false);
@@ -105,6 +113,14 @@ export default function App() {
   const updateThumbSize = useCallback((v) => {
     setThumbSize(v);
     localStorage.setItem(THUMB_SIZE_KEY, String(v));
+  }, []);
+
+  const toggleIgnoreAnalyticsItem = useCallback((key) => {
+    setIgnoredAnalytics((prev) => {
+      const next = prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key];
+      localStorage.setItem(ANALYTICS_IGNORE_KEY, JSON.stringify(next));
+      return next;
+    });
   }, []);
 
   /* ----- load / save ----- */
@@ -1271,9 +1287,26 @@ export default function App() {
 
   const activeOrders = useMemo(() => data.orders.filter((o) => isActiveStatus(o.status || "ordered")), [data.orders]);
   const activeItems = useMemo(() => allItems.filter((i) => isActiveStatus(i.status)), [allItems]);
-  const stats = useMemo(() => buildStats(data.orders, activeOrders, activeItems, carrier), [data.orders, activeOrders, activeItems, carrier]);
+  // Items excluded from Analytics only (e.g. a one-off expensive gift) —
+  // never hidden from the Items/Orders views, just from item-driven stats
+  // (top items, category spend, price histogram, saved/avg-discount).
+  // Order-level figures (charged spend, funnel, carrier, delivery time)
+  // read activeOrders directly and are unaffected either way.
+  const ignoredAnalyticsSet = useMemo(() => new Set(ignoredAnalytics), [ignoredAnalytics]);
+  const analyticsItems = useMemo(
+    () => activeItems.filter((i) => !ignoredAnalyticsSet.has(analyticsItemKey(i))),
+    [activeItems, ignoredAnalyticsSet]
+  );
+  const ignoredAnalyticsItems = useMemo(
+    () => activeItems.filter((i) => ignoredAnalyticsSet.has(analyticsItemKey(i)))
+      .map((it) => ({ ...it, amount: (it.paid || 0) * (it.qty || 1) }))
+      .sort((a, b) => b.amount - a.amount),
+    [activeItems, ignoredAnalyticsSet]
+  );
+  const stats = useMemo(() => buildStats(data.orders, activeOrders, analyticsItems, carrier), [data.orders, activeOrders, analyticsItems, carrier]);
   const review = useMemo(() => reviewQueue(data.orders), [data.orders]);
   const inTransit = useMemo(() => inTransitOrders(data.orders), [data.orders]);
+  const receivedFreeItems = useMemo(() => freeItems(allItems), [allItems]);
 
   /* ----- ctx: everything the shells need ----- */
   const ctx = {
@@ -1290,6 +1323,7 @@ export default function App() {
     updateItem, deleteOrder, openOrderPage,
     query, setQuery,
     allItems, activeOrders, activeItems, stats, review, inTransit,
+    ignoredAnalyticsItems, toggleIgnoreAnalyticsItem, receivedFreeItems,
     lightbox, setLightbox,
     layoutOverride, setLayoutOverride,
     cloudState, carrier,
