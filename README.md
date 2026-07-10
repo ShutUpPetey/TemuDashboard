@@ -105,12 +105,69 @@ One-time setup:
    `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_DATABASE_URL`, `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_APP_ID`. (For the GitHub Pages deploy, also add them as repository **Variables** and pass them in `deploy.yml` like `VITE_GOOGLE_CLIENT_ID`.)
 6. Restart `npm run dev`, sign in to Google (you'll see a one-time consent prompt for the added identity scopes) — Settings → Cloud sync should show **Live**.
 
-How it behaves: on connect, whichever side has newer data wins (whole-store,
-`updatedAt` timestamp) and is mirrored both ways; after that, every save
-writes through to Firebase and other devices update live. If Firebase is
-unreachable, everything keeps working locally and the sync log says so. The
-Firebase SDK is loaded from Google's CDN only when configured — no new npm
-dependency.
+How it behaves: on connect, local and remote are merged **per order** (see
+`src/lib/syncMerge.js`) — whichever copy of each individual order is newer
+wins, and the union of both order lists is kept, so a stale device syncing
+can't clobber a fresher edit made elsewhere to a *different* order. After
+connecting, every save writes through to Firebase and other devices update
+live. If Firebase is unreachable, everything keeps working locally and the
+sync log says so. The Firebase SDK is loaded from Google's CDN only when
+configured — no new npm dependency.
+
+## Admin access (optional, multi-user)
+
+By default every signed-in Google account gets its own private data —
+Firebase rules already scope everything under `manifest/{uid}` to that
+one uid, so separate people signing in with cloud sync configured
+automatically can't see each other's orders. This section adds ONE
+optional admin account (you) that can also browse everyone else's data,
+read-only.
+
+1. Use the **Cloud sync** rules above but expand them to also let one
+   admin email through, and to let every signed-in user write (only) their
+   own entry into a small `_directory` list the admin's panel reads:
+
+   ```json
+   {
+     "rules": {
+       "manifest": {
+         "_directory": {
+           ".read": "auth.token.email === 'you@example.com'",
+           "$uid": { ".write": "$uid === auth.uid" }
+         },
+         "$uid": {
+           ".read": "$uid === auth.uid || auth.token.email === 'you@example.com'",
+           ".write": "$uid === auth.uid"
+         }
+       }
+     }
+   }
+   ```
+
+   Replace `you@example.com` with your own Google account email (both places).
+2. Set `VITE_ADMIN_EMAIL` in `.env` (and as a repository **Variable** for the
+   GitHub Pages deploy) to that same email. This only shows/hides the Admin
+   panel in the UI — the rules above are what actually enforce it, so getting
+   the email right in both places matters.
+3. Sign in with cloud sync as usual. An **Admin** entry appears in the nav
+   (desktop sidebar, or Settings → "Open admin panel" on mobile) listing
+   every account that's ever signed in with cloud sync, with a **View data**
+   link that opens a read-only snapshot of that person's orders. Nothing in
+   the admin view can edit, sync, or write anywhere — it's a one-time fetch
+   of their `manifest/{uid}/state`, never a live connection.
+4. Leave `VITE_ADMIN_EMAIL` unset to disable the admin panel entirely
+   (single-user mode, the historical default) — you don't need the
+   `_directory` rules either in that case.
+
+**Letting other people actually sign in at all** is a separate, Google-side
+step: while the OAuth consent screen is in **Testing** mode (see "One-time
+Google Cloud setup" above), only accounts on the **Test users** list can
+sign in — add each person's Google account there (Google Cloud Console →
+Audience tab), up to 100. There's no code change for this; it's the same
+place you added yourself as a test user originally. Taking the app to
+**Production** for the restricted Gmail scope requires Google's app
+verification review — out of scope for a personal/small-group dashboard,
+but an option if you outgrow the Testing-mode allowlist.
 
 ## Live carrier ETAs (optional, needs Cloud sync)
 

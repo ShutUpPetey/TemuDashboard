@@ -2,7 +2,7 @@ import React, { useMemo, useState } from "react";
 import {
   RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, Search, X,
   Settings2, Download, RotateCcw, Pencil, Save, Trash2, LayoutDashboard,
-  ReceiptText, Tags, BarChart3, Truck, ExternalLink, CalendarDays,
+  ReceiptText, Tags, BarChart3, Truck, ExternalLink, CalendarDays, ShieldCheck,
 } from "lucide-react";
 import {
   CATEGORIES, STATUS_META, fmt, pct, isActiveStatus,
@@ -15,6 +15,7 @@ import { estimateCostPerCall } from "../lib/anthropic";
 import SettingsPanel from "./SettingsPanel";
 import AnalyticsView from "./AnalyticsView";
 import ArrivingSoonView from "./ArrivingSoonView";
+import AdminPanel from "./AdminPanel";
 import ItemSheet from "./ItemSheet";
 import OrderSheet from "./OrderSheet";
 
@@ -120,10 +121,11 @@ export default function DesktopShell({ c }) {
     ["items", "Items", Tags, c.allItems.length],
     ["analytics", "Analytics", BarChart3, null],
     ["review", "Needs review", AlertTriangle, reviewCount || null],
+    ...(c.isAdmin ? [["admin", "Admin", ShieldCheck, null]] : []),
     ["settings", "Settings", Settings2, null],
   ];
   const WARN_NAV = { review: reviewCount, arriving: overdueCount };
-  const TITLES = { overview: "Overview", arriving: "Arriving soon", orders: "Orders", items: "Items", analytics: "Analytics", review: "Needs review", settings: "Settings" };
+  const TITLES = { overview: "Overview", arriving: "Arriving soon", orders: "Orders", items: "Items", analytics: "Analytics", review: "Needs review", admin: "Admin", settings: "Settings" };
 
   return (
     <div className="min-h-screen bg-stone-100 text-stone-900 flex" style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
@@ -224,6 +226,7 @@ export default function DesktopShell({ c }) {
             </div>
           )}
           {view === "review" && <ReviewView c={c} goEditOrder={goEditOrder} />}
+          {view === "admin" && c.isAdmin && <AdminPanel c={c} />}
           {view === "settings" && (
             <div className="bg-stone-900 rounded-lg p-5 max-w-3xl"><SettingsPanel c={c} dark /></div>
           )}

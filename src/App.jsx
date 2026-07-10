@@ -5,7 +5,7 @@ import { downloadCsv, itemsCsv, ordersCsv } from "./lib/exportCsv";
 import { applyDiscounts } from "./lib/discounts";
 import { callClaude, cancelCurrentCall, textOf, extractJSON, getApiKey, setApiKey, recordUsage, estimateCostPerCall } from "./lib/anthropic";
 import { getToken, getStoredToken, isSignedIn, signIn, signOut } from "./lib/gis";
-import { cloudConfigured, cloudSignIn, cloudSignOut, cloudGet, cloudSet, cloudSubscribe, cloudSubscribeCarrier } from "./lib/firebase";
+import { cloudConfigured, cloudSignIn, cloudSignOut, cloudGet, cloudSet, cloudSubscribe, cloudSubscribeCarrier, cloudListDirectory, cloudGetUserState } from "./lib/firebase";
 import {
   searchMessages, getMessageMetadata, getMessageFull, headerValue,
   extractHtml, extractSection, extractAllSections, extractImgSrcs, extractPoNumber, extractSubOrders,
@@ -35,6 +35,11 @@ import WelcomeModal from "./components/WelcomeModal";
 
 const STORAGE_KEY = "temu-manifest-v1";
 const WELCOME_SEEN_KEY = "temu-manifest-welcome-seen-v1";
+// The one Google account allowed to see the admin directory / "view as"
+// panel — everyone else's manifest/{uid} subtree is invisible to them per
+// the Firebase rules in README → "Admin access". Unset = admin view is
+// simply never shown to anyone (single-user mode, the historical default).
+const ADMIN_EMAIL = import.meta.env.VITE_ADMIN_EMAIL || null;
 
 export default function App() {
   const [data, setData] = useState({ orders: [], processedIds: [], lastSync: null, autoSync: true });
@@ -59,6 +64,20 @@ export default function App() {
      "off" → "connecting" → "on" | "error" once configured. */
   const [cloudState, setCloudState] = useState(() => (cloudConfigured() ? "off" : "unconfigured"));
   const [carrier, setCarrier] = useState({}); // trackingNumber → live 17TRACK info (from the GitHub Action)
+  const [cloudEmail, setCloudEmail] = useState(null); // signed-in Firebase user's email, once connected
+
+  /* ----- admin: read-only "view as user" (see AdminPanel.jsx) -----
+     directory: {uid: {email, lastSeen}} for every registered user, loaded
+     on demand when the admin opens the panel. adminViewUid/adminViewState
+     hold whichever OTHER user's data is currently being viewed — kept
+     completely separate from `data`/`save()` so there is no code path by
+     which viewing someone else's data could write to their tree (or the
+     admin's own tree gets confused with theirs). */
+  const [directory, setDirectory] = useState(null);
+  const [directoryError, setDirectoryError] = useState(null);
+  const [adminViewUid, setAdminViewUid] = useState(null);
+  const [adminViewState, setAdminViewState] = useState(null);
+  const [adminViewLoading, setAdminViewLoading] = useState(false);
   const cloudReadyRef = useRef(false);      // gate write-through in save()
   const cloudConnectingRef = useRef(false); // connect() is idempotent
   const cloudUnsubRef = useRef(null);
@@ -130,7 +149,8 @@ export default function App() {
     cloudConnectingRef.current = true;
     setCloudState("connecting");
     try {
-      await cloudSignIn(token);
+      const { email } = await cloudSignIn(token);
+      setCloudEmail(email);
       const remote = await cloudGet();
       const local = dataRef.current || {};
       if (remote?.json) {
@@ -243,7 +263,43 @@ export default function App() {
     cloudConnectingRef.current = false;
     cloudSignOut();
     if (cloudConfigured()) setCloudState("off");
+    setCloudEmail(null);
+    setDirectory(null);
+    setAdminViewUid(null);
+    setAdminViewState(null);
     pushLog("Signed out of Google.");
+  }, []);
+
+  /* ----- admin: directory + read-only "view as user" ----- */
+  const isAdmin = !!(ADMIN_EMAIL && cloudEmail && cloudEmail === ADMIN_EMAIL);
+
+  const loadDirectory = useCallback(async () => {
+    setDirectoryError(null);
+    try {
+      setDirectory(await cloudListDirectory());
+    } catch (e) {
+      setDirectoryError(e.message);
+    }
+  }, []);
+
+  const viewUserData = useCallback(async (otherUid) => {
+    setAdminViewUid(otherUid);
+    setAdminViewState(null);
+    setAdminViewLoading(true);
+    try {
+      const remote = await cloudGetUserState(otherUid);
+      setAdminViewState(remote?.json ? JSON.parse(remote.json) : { orders: [] });
+    } catch (e) {
+      pushLog(`Admin view failed for ${otherUid}: ${e.message}`, "error");
+      setAdminViewUid(null);
+    } finally {
+      setAdminViewLoading(false);
+    }
+  }, []);
+
+  const exitAdminView = useCallback(() => {
+    setAdminViewUid(null);
+    setAdminViewState(null);
   }, []);
 
   /* ----- export / import ----- */
@@ -1165,6 +1221,8 @@ export default function App() {
     layoutOverride, setLayoutOverride,
     cloudState, carrier,
     openWelcome,
+    isAdmin, directory, directoryError, loadDirectory,
+    adminViewUid, adminViewState, adminViewLoading, viewUserData, exitAdminView,
   };
 
   return (
