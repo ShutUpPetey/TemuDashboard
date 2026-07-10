@@ -1111,6 +1111,15 @@ export default function App() {
           const target = oid && working.orders.find((o) => o.id === oid);
           if (target) {
             target.status = em.kind;
+            // The EMAIL's own date, not sync time — a Reconcile can apply a
+            // backlog of old status emails in one pass (or the app might
+            // just not be opened for a while), so "when we happened to
+            // process this" can be days after the real event. Used by
+            // arrivingCalendar's "Recently Delivered" (see deliveredAtFor
+            // in lib/derive.js) instead of updatedAt for exactly that
+            // reason — updatedAt still separately tracks sync/cloud-merge
+            // bookkeeping below and stays as-is for that purpose.
+            target.statusEmailAt = em.at || em.date || target.statusEmailAt;
             if (html) {
               const eta = extractEta(html);
               if (eta) target.eta = eta;

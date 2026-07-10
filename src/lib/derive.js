@@ -66,13 +66,24 @@ function asDay(d) {
 
 /* No status-change history is kept anywhere in the data model (orders only
    store their CURRENT status — same limitation noted on deliveryDaysFor
-   further down), so "when was this delivered" is a proxy, same precedence
-   used there: the carrier's own eventTime when we have one, else the
-   order's own updatedAt (stamped whenever the carrier-promote effect or a
-   status email flips it to delivered — see App.jsx), else its order date. */
+   further down), so "when was this delivered" is a proxy:
+   1. the carrier's own eventTime, when we have one — the actual delivery
+      scan, most accurate when available.
+   2. order.statusEmailAt — the delivered EMAIL's own date (stamped in
+      App.jsx's status-email loop). Deliberately NOT order.updatedAt: that's
+      stamped at SYNC time, which can be days after the real event (a
+      Reconcile applies a backlog of old status emails in one pass, or the
+      app just wasn't opened for a while) — updatedAt answers "when did
+      this browser find out," statusEmailAt answers "when did Temu say it
+      happened," and the latter is what "recently delivered" should mean.
+   3. order.updatedAt, for orders promoted to delivered by the carrier
+      effect rather than an email (no statusEmailAt to use) or any other
+      path that set status without going through the email loop.
+   4. order.date as a last resort. */
 function deliveredAtFor(order, carrierMap) {
   const info = order.tracking?.number && carrierMap ? carrierMap[order.tracking.number] : null;
   if (info?.status === "Delivered" && info.eventTime) return new Date(info.eventTime);
+  if (order.statusEmailAt) return new Date(order.statusEmailAt);
   if (order.updatedAt) return new Date(order.updatedAt);
   return order.date ? new Date(order.date) : null;
 }

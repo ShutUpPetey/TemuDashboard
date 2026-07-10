@@ -99,10 +99,12 @@ Worker: `scripts/carrier-eta.mjs` run by `.github/workflows/carrier-eta.yml`
 Order: `{ id: "PO-211-…", messageId, date, status: ordered|shipped|delivered|
 cancelled|returned, subtotal, discount, shipping, tax, total, discountFactor,
 items[], images[], orderUrl, eta (email text), tracking: {carrier, number, url},
-manualEdit, updatedAt }` — `updatedAt` is a PER-ORDER timestamp (added whenever
-that order is mutated: status pass, fixEstimatedPrices, manual edit, carrier
-promotion) used ONLY for cloud sync merge (see Key Mechanisms); unrelated to
-the top-level state's `updatedAt`. Item: `{ name, listed, paid, qty, category, discountPct,
+manualEdit, updatedAt, statusEmailAt }` — `updatedAt` is a PER-ORDER timestamp
+(added whenever that order is mutated: status pass, fixEstimatedPrices, manual
+edit, carrier promotion) used ONLY for cloud sync merge (see Key Mechanisms);
+unrelated to the top-level state's `updatedAt`, and NOT the same thing as
+`statusEmailAt` — see "Recently delivered" in Key Mechanisms for why the two
+are deliberately different signals. Item: `{ name, listed, paid, qty, category, discountPct,
 estimated, listedUnknown, thumbUrl, thumbY }` — `estimated` means `paid` itself
 is a guess (multi-item split order, even-split fallback); `listedUnknown`
 means `paid` is exact but the pre-discount `listed` price was never shown
@@ -219,20 +221,50 @@ Firebase sign-in.
   date/total on mobile), matching the Items view's existing filter/sort
   pattern.
 - **Arriving Soon calendar (`arrivingCalendar()` in `lib/derive.js`)**: buckets
-  every non-delivered, non-cancelled/returned item onto a 14-day forward
-  calendar. "Expected date" prefers the live carrier ETA window (`etaTo`,
-  falling back to `etaFrom`) over the parsed email-ETA text (`etaEndDate` in
-  `gmail.js`), since Temu doesn't send a structured "guaranteed by" date
-  anywhere currently scraped (see Open threads). An item is **overdue** once
-  its expected date has passed without a `Delivered` carrier status — flagged
-  regardless of whether that date is still inside the visible 14-day window,
-  via a separate always-visible alert banner. **Stale** (a distinct, lower-
-  severity flag) means the carrier hasn't reported anything in 48h+ while
-  still `InTransit`/`OutForDelivery`/`AvailableForPickup`, and isn't already
+  every non-delivered, non-cancelled/returned item onto a forward calendar
+  (nominally 14 days, `days` param). The desktop grid always starts on a
+  Sunday and ends on a Saturday like a real calendar — so a column is always
+  the same weekday in every row — which grows the actual range to 14-20 days
+  depending on today's weekday (back to this week's Sunday, forward to the
+  Saturday completing the week containing today+13). The leading pre-today
+  days are pure alignment filler: nothing is ever bucketed into them (an
+  overdue item still only shows in `overdueItems`, never duplicated onto its
+  past due-date), they just render muted instead of the "—" empty-day
+  placeholder. `today` is returned separately since `calendar[0]` is no
+  longer necessarily today. Mobile's day list already skips empty days, so
+  it's unaffected — the leading filler days are simply never shown there.
+  "Expected date" prefers the live carrier ETA window (`etaTo`, falling back
+  to `etaFrom`) over the parsed email-ETA text (`etaEndDate` in `gmail.js`),
+  since Temu doesn't send a structured "guaranteed by" date anywhere
+  currently scraped (see Open threads). An item is **overdue** once its
+  expected date has passed without a `Delivered` carrier status — flagged
+  regardless of whether that date is still inside the visible window, via a
+  separate always-visible alert banner. **Stale** (a distinct, lower-severity
+  flag) means the carrier hasn't reported anything in 48h+ while still
+  `InTransit`/`OutForDelivery`/`AvailableForPickup`, and isn't already
   overdue (overdue takes precedence, never double-badged). Items with
   no carrier data AND no parseable email ETA go in a separate "no estimate
   yet" bucket — but only once `shipped` (an `ordered` item simply hasn't
   shipped yet, which isn't a gap worth flagging).
+- **Recently delivered (`arrivingCalendar()`'s `recentlyDelivered`)**: delivered
+  items from the last 7 days, newest first, shown as a green chip strip below
+  "No estimate yet" so items that were arriving/overdue/stale can be seen
+  resolving instead of just disappearing the moment they're marked delivered.
+  No status-change history is kept anywhere in the data model (orders only
+  store their CURRENT status), so "when was this delivered" (`deliveredAtFor`)
+  is necessarily a proxy, in order of preference: (1) the carrier's own
+  `eventTime` when available — the actual delivery scan; (2) `order.statusEmailAt`
+  — the delivered EMAIL's own date; (3) `order.updatedAt`, for orders promoted
+  to delivered by the carrier-promote effect rather than an email; (4)
+  `order.date` as a last resort. `statusEmailAt` is deliberately a SEPARATE
+  field from `updatedAt`: `updatedAt` is stamped at sync time (App.jsx's
+  status-email loop), which can be days after the real event — a Reconcile
+  applies a whole backlog of old status emails in one pass, or the app just
+  might not be opened often — while `statusEmailAt` is stamped from the
+  email's own date (`em.at || em.date`). `updatedAt` answers "when did this
+  browser find out"; `statusEmailAt` answers "when did Temu say it happened."
+  Using `updatedAt` here originally made "Xd ago" reflect sync timing instead
+  of real delivery timing — fixed by adding `statusEmailAt`.
 - **Admin access (optional multi-user)**: default is still effectively
   single-tenant-per-uid — Firebase rules already scope `manifest/{uid}` to
   that uid, so separate signed-in accounts can't see each other regardless of
