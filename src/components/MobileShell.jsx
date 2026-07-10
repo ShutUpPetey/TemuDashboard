@@ -1,15 +1,18 @@
 import React, { useMemo, useState } from "react";
 import {
   RefreshCw, Search, Settings2, BarChart3, ReceiptText,
-  LayoutGrid, RotateCcw, AlertTriangle, ExternalLink,
+  LayoutGrid, RotateCcw, AlertTriangle, ExternalLink, CalendarDays, ShieldCheck,
 } from "lucide-react";
 import {
   CATEGORIES, fmt, pct, isActiveStatus, StatusChip, CropThumb, annotateThumbs, Elapsed, Empty, LogPanel,
   carrierInfoFor, carrierEtaText,
 } from "./shared";
-import { siblingOrders, matchesQuery, itemSearchIndex, orderSearchIndex } from "../lib/derive";
+import { siblingOrders, matchesQuery, itemSearchIndex, orderSearchIndex, arrivingCalendar } from "../lib/derive";
+import { estimateCostPerCall } from "../lib/anthropic";
 import SettingsPanel from "./SettingsPanel";
 import AnalyticsView from "./AnalyticsView";
+import ArrivingSoonView from "./ArrivingSoonView";
+import AdminPanel from "./AdminPanel";
 import ItemSheet from "./ItemSheet";
 import OrderSheet from "./OrderSheet";
 import { useWindowWidth } from "../hooks/useMediaQuery";
@@ -34,7 +37,7 @@ const ORDER_SORTS = [
 ];
 
 export default function MobileShell({ c }) {
-  const [view, setView] = useState("items"); // items | orders | analytics | settings
+  const [view, setView] = useState("items"); // items | orders | arriving | analytics | settings
   const [chip, setChip] = useState("All");   // All | <category> | __transit | __review | __listprice
   const [sortKey, setSortKey] = useState("date");
   const [orderStatusFilter, setOrderStatusFilter] = useState("All");
@@ -104,6 +107,8 @@ export default function MobileShell({ c }) {
       return dir * String(a.date || "").localeCompare(String(b.date || ""));
     });
   }, [c.data.orders, orderStatusFilter, c.query, orderSort]);
+
+  const overdueCount = useMemo(() => arrivingCalendar(c.data.orders, c.carrier, 14).overdueItems.length, [c.data.orders, c.carrier]);
 
   const dock = useMemo(() => {
     const paid = rows.reduce((s, i) => s + (i.paid || 0) * (i.qty || 1), 0);
@@ -290,6 +295,12 @@ export default function MobileShell({ c }) {
         </div>
       )}
 
+      {view === "arriving" && (
+        <div className="px-4 pt-3">
+          <ArrivingSoonView c={c} openItem={(it) => setSheet(it)} mobile />
+        </div>
+      )}
+
       {view === "analytics" && (
         <div className="px-4 pt-3">
           <div className="bg-white border border-stone-200 rounded-xl p-3">
@@ -298,8 +309,20 @@ export default function MobileShell({ c }) {
         </div>
       )}
 
+      {view === "admin" && c.isAdmin && (
+        <div className="px-4 pt-3">
+          <AdminPanel c={c} />
+        </div>
+      )}
+
       {view === "settings" && (
         <div className="px-4 pt-3 space-y-3">
+          {c.isAdmin && (
+            <button onClick={() => setView("admin")}
+              className="w-full flex items-center gap-2 bg-orange-50 border border-orange-300 text-orange-800 rounded-xl px-4 py-3 text-sm font-semibold">
+              <ShieldCheck size={14} /> Open admin panel
+            </button>
+          )}
           {c.failedEmails.length > 0 && !c.syncing && (
             <button onClick={c.retryFailedEmails}
               className="w-full flex items-center gap-2 bg-amber-50 border border-amber-300 text-amber-800 rounded-xl px-4 py-3 text-sm font-semibold">
@@ -318,6 +341,7 @@ export default function MobileShell({ c }) {
               </div>
             </div>
           )}
+          {c.review.estimatedItems.length > 0 && !c.syncing && <FixAllBanner c={c} />}
           <div className="bg-white border border-stone-200 rounded-xl p-4">
             <SettingsPanel c={c} dark={false} />
           </div>
@@ -347,16 +371,36 @@ export default function MobileShell({ c }) {
           <DockStat k="Avg off" v={pct(dock.off)} cls="text-emerald-300" />
         </div>
         <div className="flex items-center justify-around pt-1.5">
-          {[["items", LayoutGrid, "Items"], ["orders", ReceiptText, "Orders"], ["analytics", BarChart3, "Charts"], ["settings", Settings2, "Settings"]].map(([id, Icon, label]) => (
+          {[["items", LayoutGrid, "Items"], ["orders", ReceiptText, "Orders"], ["arriving", CalendarDays, "Arriving"], ["analytics", BarChart3, "Charts"], ["settings", Settings2, "Settings"]].map(([id, Icon, label]) => (
             <button key={id} onClick={() => setView(id)}
               className={`flex flex-col items-center gap-0.5 px-3 py-1 rounded-lg text-[10px] font-semibold ${view === id ? "text-orange-300" : "text-stone-400"}`}>
               <Icon size={17} />{label}
               {id === "settings" && counts.review > 0 && <span className="absolute translate-x-3 -translate-y-1 w-2 h-2 rounded-full bg-amber-400" />}
+              {id === "arriving" && overdueCount > 0 && <span className="absolute translate-x-3 -translate-y-1 w-2 h-2 rounded-full bg-red-500" />}
             </button>
           ))}
         </div>
       </nav>
     </div>
+  );
+}
+
+/* "Fix all" — mobile equivalent of DesktopShell's FixAllButton. Mobile has
+   no dedicated Review list (estimated items are reached via the "⚠ Review"
+   chip on Items + ItemSheet's per-item "Try real prices"), so this banner in
+   Settings is the bulk entry point — one click, cost estimated up front from
+   this device's own past fixes (lib/anthropic.js → estimateCostPerCall). */
+function FixAllBanner({ c }) {
+  const orderIds = useMemo(() => [...new Set(c.review.estimatedItems.map((it) => it.orderId))], [c.review.estimatedItems]);
+  const cost = useMemo(() => estimateCostPerCall("fixPrices"), [c.review.estimatedItems]);
+  const total = cost.perCall * orderIds.length;
+  if (!orderIds.length) return null;
+  return (
+    <button onClick={c.fixAllEstimatedPrices}
+      className="w-full flex items-center justify-between gap-2 bg-emerald-50 border border-emerald-300 text-emerald-800 rounded-xl px-4 py-3 text-sm font-semibold">
+      <span>Fix all {orderIds.length} estimated price{orderIds.length === 1 ? "" : "s"}</span>
+      <span className="mono text-xs font-normal">~{fmt(total)}</span>
+    </button>
   );
 }
 

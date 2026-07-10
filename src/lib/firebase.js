@@ -22,7 +22,9 @@
      (each order carries its own updatedAt). IndexedDB remains the
      local cache/offline fallback.
 
-   Suggested security rules (Firebase console → Realtime Database → Rules):
+   Suggested security rules (Firebase console → Realtime Database → Rules) —
+   see README → "Admin access (optional, multi-user)" for the version that
+   also lets one admin email read every user's data:
      {
        "rules": {
          "manifest": {
@@ -60,30 +62,74 @@ async function fb() {
 }
 
 let uid = null;
+let email = null;
 
 /* Sign into Firebase with the Google OAuth access token the app already
-   holds for Gmail. Idempotent — safe to call on every token refresh. */
+   holds for Gmail. Idempotent — safe to call on every token refresh.
+   Returns { uid, email } (email powers the admin check in App.jsx and is
+   also stamped into the directory record below). */
 export async function cloudSignIn(googleAccessToken) {
   if (!cloudConfigured()) throw new Error("Firebase is not configured");
   const { app, authMod } = await fb();
   const auth = authMod.getAuth(app);
   if (auth.currentUser) {
     uid = auth.currentUser.uid;
-    return uid;
+    email = auth.currentUser.email || null;
+  } else {
+    const cred = authMod.GoogleAuthProvider.credential(null, googleAccessToken);
+    const res = await authMod.signInWithCredential(auth, cred);
+    uid = res.user.uid;
+    email = res.user.email || null;
   }
-  const cred = authMod.GoogleAuthProvider.credential(null, googleAccessToken);
-  const res = await authMod.signInWithCredential(auth, cred);
-  uid = res.user.uid;
-  return uid;
+  writeDirectoryEntry().catch(() => { /* best-effort; admin directory just won't list this user yet */ });
+  return { uid, email };
+}
+
+export function currentUser() {
+  return { uid, email };
 }
 
 export async function cloudSignOut() {
   uid = null;
+  email = null;
   if (!loadedPromise) return;
   try {
     const { app, authMod } = await fb();
     await authMod.signOut(authMod.getAuth(app));
   } catch { /* best-effort */ }
+}
+
+/* Every signed-in user (not just the admin) stamps their own directory
+   entry — this is the ONLY thing anyone writes outside their own
+   manifest/{uid} subtree, and the rules below only let a user write their
+   OWN entry. It's what lets the admin view (see App.jsx / AdminPanel.jsx)
+   list "who's registered" without needing a separate backend. */
+async function writeDirectoryEntry() {
+  const { app, dbMod } = await fb();
+  const ref = dbMod.ref(dbMod.getDatabase(app), `manifest/_directory/${uid}`);
+  await dbMod.set(ref, { email, lastSeen: Date.now() });
+}
+
+/* Admin-only: list every registered user's directory entry. Firebase rules
+   restrict reading manifest/_directory to the configured admin email, so
+   this simply throws (permission denied) for anyone else — no client-side
+   role check needed to keep it honest. */
+export async function cloudListDirectory() {
+  const { app, dbMod } = await fb();
+  const ref = dbMod.ref(dbMod.getDatabase(app), "manifest/_directory");
+  const snap = await dbMod.get(ref);
+  return snap.exists() ? snap.val() : {};
+}
+
+/* Admin-only, read-only, one-time fetch of another user's state (never a
+   live subscription, never a write) — used by the "View data" admin
+   switcher. Firebase rules gate this the same way as cloudGet(); a
+   non-admin caller simply gets a permission-denied error. */
+export async function cloudGetUserState(otherUid) {
+  const { app, dbMod } = await fb();
+  const ref = dbMod.ref(dbMod.getDatabase(app), `manifest/${otherUid}/state`);
+  const snap = await dbMod.get(ref);
+  return snap.exists() ? snap.val() : null;
 }
 
 async function stateRef() {

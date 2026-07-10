@@ -3,9 +3,9 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import { storage } from "./lib/storage";
 import { downloadCsv, itemsCsv, ordersCsv } from "./lib/exportCsv";
 import { applyDiscounts } from "./lib/discounts";
-import { callClaude, cancelCurrentCall, textOf, extractJSON, getApiKey, setApiKey } from "./lib/anthropic";
+import { callClaude, cancelCurrentCall, textOf, extractJSON, getApiKey, setApiKey, recordUsage, estimateCostPerCall } from "./lib/anthropic";
 import { getToken, getStoredToken, isSignedIn, signIn, signOut } from "./lib/gis";
-import { cloudConfigured, cloudSignIn, cloudSignOut, cloudGet, cloudSet, cloudSubscribe, cloudSubscribeCarrier, cloudClockSkew } from "./lib/firebase";
+import { cloudConfigured, cloudSignIn, cloudSignOut, cloudGet, cloudSet, cloudSubscribe, cloudSubscribeCarrier, cloudClockSkew, cloudListDirectory, cloudGetUserState } from "./lib/firebase";
 import {
   searchMessages, getMessageMetadata, getMessageFull, headerValue,
   extractHtml, extractSection, extractAllSections, extractImgSrcs, extractPoNumber, extractSubOrders,
@@ -17,6 +17,7 @@ import { CATEGORIES, fmt, numOrNull, annotateThumbs, Lightbox, THUMB_SIZE_KEY, T
 import { useLayoutMode } from "./hooks/useMediaQuery";
 import DesktopShell from "./components/DesktopShell";
 import MobileShell from "./components/MobileShell";
+import WelcomeModal from "./components/WelcomeModal";
 
 /* ============================================================
    Temu Order Manifest — syncs Gmail directly (Google OAuth + REST),
@@ -33,6 +34,12 @@ import MobileShell from "./components/MobileShell";
    ============================================================ */
 
 const STORAGE_KEY = "temu-manifest-v1";
+const WELCOME_SEEN_KEY = "temu-manifest-welcome-seen-v1";
+// The one Google account allowed to see the admin directory / "view as"
+// panel — everyone else's manifest/{uid} subtree is invisible to them per
+// the Firebase rules in README → "Admin access". Unset = admin view is
+// simply never shown to anyone (single-user mode, the historical default).
+const ADMIN_EMAIL = import.meta.env.VITE_ADMIN_EMAIL || null;
 
 export default function App() {
   const [data, setData] = useState({ orders: [], processedIds: [], lastSync: null, autoSync: true });
@@ -41,6 +48,7 @@ export default function App() {
   const [log, setLog] = useState([]);
   const [query, setQuery] = useState("");
   const [lightbox, setLightbox] = useState(null);
+  const [showWelcome, setShowWelcome] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState(() => getApiKey());
   const [googleSignedIn, setGoogleSignedIn] = useState(() => isSignedIn());
   const [failedEmails, setFailedEmails] = useState([]);
@@ -56,6 +64,20 @@ export default function App() {
      "off" → "connecting" → "on" | "error" once configured. */
   const [cloudState, setCloudState] = useState(() => (cloudConfigured() ? "off" : "unconfigured"));
   const [carrier, setCarrier] = useState({}); // trackingNumber → live 17TRACK info (from the GitHub Action)
+  const [cloudEmail, setCloudEmail] = useState(null); // signed-in Firebase user's email, once connected
+
+  /* ----- admin: read-only "view as user" (see AdminPanel.jsx) -----
+     directory: {uid: {email, lastSeen}} for every registered user, loaded
+     on demand when the admin opens the panel. adminViewUid/adminViewState
+     hold whichever OTHER user's data is currently being viewed — kept
+     completely separate from `data`/`save()` so there is no code path by
+     which viewing someone else's data could write to their tree (or the
+     admin's own tree gets confused with theirs). */
+  const [directory, setDirectory] = useState(null);
+  const [directoryError, setDirectoryError] = useState(null);
+  const [adminViewUid, setAdminViewUid] = useState(null);
+  const [adminViewState, setAdminViewState] = useState(null);
+  const [adminViewLoading, setAdminViewLoading] = useState(false);
   const cloudReadyRef = useRef(false);      // gate write-through in save()
   const cloudConnectRef = useRef(null);     // the in-flight/settled connect() promise — idempotent AND awaitable
   const cloudUnsubRef = useRef(null);
@@ -92,9 +114,21 @@ export default function App() {
         const r = await storage.get(STORAGE_KEY);
         if (r?.value) setData((d) => ({ ...d, ...JSON.parse(r.value) }));
       } catch { /* first run */ }
+      try {
+        const w = await storage.get(WELCOME_SEEN_KEY);
+        if (!w?.value) setShowWelcome(true); // first-ever load — no seen flag yet
+      } catch { /* if this fails, better to show it than silently skip */ setShowWelcome(true); }
       setLoaded(true);
     })();
   }, []);
+
+  /* First-run tour: shown automatically once, re-launchable anytime from
+     Settings (openWelcome doesn't touch the persisted flag). */
+  const closeWelcome = useCallback(() => {
+    setShowWelcome(false);
+    storage.set(WELCOME_SEEN_KEY, "1").catch(() => {});
+  }, []);
+  const openWelcome = useCallback(() => setShowWelcome(true), []);
 
   const save = useCallback(async (next) => {
     // updatedAt is the whole-blob version for cloud newest-wins resolution.
@@ -147,7 +181,8 @@ export default function App() {
     const connecting = (async () => {
       setCloudState("connecting");
       try {
-        await cloudSignIn(token);
+        const { email } = await cloudSignIn(token);
+        setCloudEmail(email);
         const remote = await cloudGet();
         const local = dataRef.current || {};
         if (remote?.json) {
@@ -275,7 +310,43 @@ export default function App() {
     cloudConnectRef.current = null;
     cloudSignOut();
     if (cloudConfigured()) setCloudState("off");
+    setCloudEmail(null);
+    setDirectory(null);
+    setAdminViewUid(null);
+    setAdminViewState(null);
     pushLog("Signed out of Google.");
+  }, []);
+
+  /* ----- admin: directory + read-only "view as user" ----- */
+  const isAdmin = !!(ADMIN_EMAIL && cloudEmail && cloudEmail === ADMIN_EMAIL);
+
+  const loadDirectory = useCallback(async () => {
+    setDirectoryError(null);
+    try {
+      setDirectory(await cloudListDirectory());
+    } catch (e) {
+      setDirectoryError(e.message);
+    }
+  }, []);
+
+  const viewUserData = useCallback(async (otherUid) => {
+    setAdminViewUid(otherUid);
+    setAdminViewState(null);
+    setAdminViewLoading(true);
+    try {
+      const remote = await cloudGetUserState(otherUid);
+      setAdminViewState(remote?.json ? JSON.parse(remote.json) : { orders: [] });
+    } catch (e) {
+      pushLog(`Admin view failed for ${otherUid}: ${e.message}`, "error");
+      setAdminViewUid(null);
+    } finally {
+      setAdminViewLoading(false);
+    }
+  }, []);
+
+  const exitAdminView = useCallback(() => {
+    setAdminViewUid(null);
+    setAdminViewState(null);
   }, []);
 
   /* ----- export / import ----- */
@@ -732,9 +803,75 @@ export default function App() {
      has real per-item prices. This finds one such email, re-runs the normal
      (non-split) vision parse against its images, and replaces the order's
      estimated items with the real numbers. Manual only (costs one vision
-     call) — triggered from the Review queue's "Estimated prices" list. The
+     call) — triggered from the Review queue's "Estimated prices" list, either
+     one order at a time or all at once (see fixAllEstimatedPrices below). The
      result is marked manualEdit so a later re-read of the (still priceless)
-     split confirmation can't silently revert it back to an estimate. */
+     split confirmation can't silently revert it back to an estimate.
+
+     fetchFixedOrder is the shared core — it takes an order OBJECT (not an
+     id looked up from React state) so the bulk loop below can thread its own
+     in-progress working copy through repeated calls without racing React's
+     async state updates. It doesn't touch data/save/syncing itself; callers
+     own that. */
+  const fetchFixedOrder = useCallback(async (order, token) => {
+    const msgs = await searchMessages(
+      `from:transaction.temu.com subject:(shipped OR delivered OR arrived OR "transferred to" OR delivery) "${order.id}"`,
+      token, 10
+    );
+    let html = null;
+    for (const m of msgs) {
+      try {
+        const fullMsg = await getMessageFull(m.id, token);
+        const h = extractHtml(fullMsg.payload);
+        if (extractSection(h, "goods_list") && extractSection(h, "order_pay_info_row")) { html = h; break; }
+      } catch { /* try next candidate */ }
+    }
+    if (!html) return { error: "no-status-email" };
+    const goods = extractImgSrcs(extractSection(html, "goods_list")).filter((u) => /^https?:\/\//.test(u));
+    const pay = extractImgSrcs(extractSection(html, "order_pay_info_row")).filter((u) => /^https?:\/\//.test(u));
+    if (!goods.length) return { error: "no-item-image" };
+    const urls = [...goods, ...pay];
+    // Orders re-consolidated from a split-purchase sub-order can run to
+    // 15-20+ items — the default 2000-token budget (see anthropic.js)
+    // truncated the JSON mid-response for a real case like this. Full
+    // item + price + category JSON for a big order needs more headroom.
+    const resp = await callClaude([
+      ...urls.map((u) => ({ type: "image", source: { type: "url", url: u } })),
+      {
+        type: "text",
+        text:
+          `The first ${goods.length} image(s) show the purchased items of a Temu order — one row per item: product photo on the left, then name, quantity, price. ` +
+          `The remaining ${pay.length} image(s) show the payment summary. ` +
+          `Respond with ONLY compact single-line JSON, no prose: ` +
+          `{"subtotal":0,"discount":0,"shipping":0,"tax":0,"total":0,` +
+          `"items":[{"n":"short name max 8 words","listed":0,"qty":1,"c":"cat","gi":0,"y":50}]}. ` +
+          `"discount" = sum of all discount/coupon/credit lines as a positive number; "total" = amount actually charged; use null for anything not visible. ` +
+          `"gi" = 0-based index of which items image the row is in; "y" = vertical center of that item's row within its image, as an integer percent (0=top, 100=bottom). ` +
+          `"c" must be one of: ${CATEGORIES.join(", ")}.`,
+      },
+    ], { maxTokens: 4000 });
+    recordUsage("fixPrices", resp.usage);
+    const parsed = extractJSON(resp);
+    const fixed = applyDiscounts({
+      ...order,
+      subtotal: parsed.subtotal ?? order.subtotal,
+      discount: parsed.discount ?? order.discount,
+      shipping: parsed.shipping ?? order.shipping,
+      tax: parsed.tax ?? order.tax,
+      total: parsed.total ?? order.total,
+      items: (parsed.items || []).map((it) => ({
+        name: it.n, listed: it.listed, qty: it.qty || 1,
+        category: CATEGORIES.includes(it.c) ? it.c : "Other",
+        thumbUrl: goods[it.gi || 0] || goods[0] || null,
+        thumbY: Number.isFinite(it.y) ? Math.max(0, Math.min(100, it.y)) : null,
+      })),
+      images: urls,
+      manualEdit: true,
+      updatedAt: Date.now(), // per-order timestamp for cloud merge (lib/syncMerge.js)
+    });
+    return { fixed };
+  }, []);
+
   const fixEstimatedPrices = useCallback(async (orderId) => {
     if (syncing) return;
     const order = data.orders.find((o) => o.id === orderId);
@@ -745,66 +882,15 @@ export default function App() {
       const token = await getToken({ interactive: true });
       setGoogleSignedIn(true);
       pushLog(`Looking for a shipped/delivered email for ${orderId} with real prices…`);
-      const msgs = await searchMessages(
-        `from:transaction.temu.com subject:(shipped OR delivered OR arrived OR "transferred to" OR delivery) "${orderId}"`,
-        token, 10
-      );
-      let html = null;
-      for (const m of msgs) {
-        try {
-          const fullMsg = await getMessageFull(m.id, token);
-          const h = extractHtml(fullMsg.payload);
-          if (extractSection(h, "goods_list") && extractSection(h, "order_pay_info_row")) { html = h; break; }
-        } catch { /* try next candidate */ }
-      }
-      if (!html) {
+      const { fixed, error } = await fetchFixedOrder(order, token);
+      if (error === "no-status-email") {
         pushLog(`No status email with a priced receipt image was found for ${orderId}.`, "warn");
         return;
       }
-      const goods = extractImgSrcs(extractSection(html, "goods_list")).filter((u) => /^https?:\/\//.test(u));
-      const pay = extractImgSrcs(extractSection(html, "order_pay_info_row")).filter((u) => /^https?:\/\//.test(u));
-      if (!goods.length) {
+      if (error === "no-item-image") {
         pushLog(`Found a status email for ${orderId} but couldn't find its item image.`, "warn");
         return;
       }
-      pushLog(`Re-reading ${orderId}'s real prices from its status email…`);
-      const urls = [...goods, ...pay];
-      // Orders re-consolidated from a split-purchase sub-order can run to
-      // 15-20+ items — the default 2000-token budget (see anthropic.js)
-      // truncated the JSON mid-response for a real case like this. Full
-      // item + price + category JSON for a big order needs more headroom.
-      const parsed = extractJSON(await callClaude([
-        ...urls.map((u) => ({ type: "image", source: { type: "url", url: u } })),
-        {
-          type: "text",
-          text:
-            `The first ${goods.length} image(s) show the purchased items of a Temu order — one row per item: product photo on the left, then name, quantity, price. ` +
-            `The remaining ${pay.length} image(s) show the payment summary. ` +
-            `Respond with ONLY compact single-line JSON, no prose: ` +
-            `{"subtotal":0,"discount":0,"shipping":0,"tax":0,"total":0,` +
-            `"items":[{"n":"short name max 8 words","listed":0,"qty":1,"c":"cat","gi":0,"y":50}]}. ` +
-            `"discount" = sum of all discount/coupon/credit lines as a positive number; "total" = amount actually charged; use null for anything not visible. ` +
-            `"gi" = 0-based index of which items image the row is in; "y" = vertical center of that item's row within its image, as an integer percent (0=top, 100=bottom). ` +
-            `"c" must be one of: ${CATEGORIES.join(", ")}.`,
-        },
-      ], { maxTokens: 4000 }));
-      const fixed = applyDiscounts({
-        ...order,
-        subtotal: parsed.subtotal ?? order.subtotal,
-        discount: parsed.discount ?? order.discount,
-        shipping: parsed.shipping ?? order.shipping,
-        tax: parsed.tax ?? order.tax,
-        total: parsed.total ?? order.total,
-        items: (parsed.items || []).map((it) => ({
-          name: it.n, listed: it.listed, qty: it.qty || 1,
-          category: CATEGORIES.includes(it.c) ? it.c : "Other",
-          thumbUrl: goods[it.gi || 0] || goods[0] || null,
-          thumbY: Number.isFinite(it.y) ? Math.max(0, Math.min(100, it.y)) : null,
-        })),
-        images: urls,
-        manualEdit: true,
-        updatedAt: Date.now(), // per-order timestamp for cloud merge (lib/syncMerge.js)
-      });
       const cur = dataRef.current || data; // dataRef, not the render closure — see save()
       await save({ ...cur, orders: cur.orders.map((o) => (o.id === orderId ? fixed : o)) });
       pushLog(`✓ ${orderId}: replaced estimated prices with real ones from its status email.`, "ok");
@@ -813,7 +899,62 @@ export default function App() {
     } finally {
       setSyncing(false);
     }
-  }, [syncing, data, save]);
+  }, [syncing, data, save, fetchFixedOrder]);
+
+  /* ----- fix ALL estimated prices in one pass -----
+     Same one-vision-call-per-order mechanism as fixEstimatedPrices, just
+     looped across every order currently in the Review queue's "Estimated
+     prices" bucket — one order can have several estimated ITEMS, so this
+     dedupes to unique order IDs first (that's the actual API-call count and
+     what the cost estimate in the UI is based on, via estimateCostPerCall in
+     lib/anthropic.js). Reuses the same syncing/cancel machinery as every
+     other bulk operation (sync, Reconcile, retry-failed) so the existing
+     progress banner + Cancel button just work. Saves after each order
+     (not just at the end) so a cancel or a crash partway through keeps
+     whatever was already fixed. */
+  const fixAllEstimatedPrices = useCallback(async () => {
+    if (syncing) return;
+    // computed fresh from data.orders (not the `review` memo below) so this
+    // doesn't have to be declared after it in the component body
+    const orderIds = [...new Set(reviewQueue(data.orders).estimatedItems.map((it) => it.orderId))];
+    if (!orderIds.length) return;
+    setSyncing(true);
+    cancelRequestedRef.current = false;
+    pushLog(`Fixing estimated prices for ${orderIds.length} order(s)…`);
+    const base = dataRef.current || data; // dataRef, not the render closure — see save()
+    let working = { ...base, orders: [...base.orders] };
+    let fixedCount = 0, skippedCount = 0;
+    try {
+      const token = await getToken({ interactive: true });
+      setGoogleSignedIn(true);
+      for (let i = 0; i < orderIds.length; i++) {
+        if (cancelRequestedRef.current) { pushLog(`Fix all cancelled after ${i}/${orderIds.length}.`, "warn"); break; }
+        const id = orderIds[i];
+        const order = working.orders.find((o) => o.id === id);
+        if (!order) continue;
+        pushLog(`${i + 1}/${orderIds.length}: ${id}…`);
+        try {
+          const { fixed, error } = await fetchFixedOrder(order, token);
+          if (error) {
+            pushLog(`  skipped ${id}: ${error === "no-status-email" ? "no priced status email found" : "no item image in status email"}`, "warn");
+            skippedCount++;
+            continue;
+          }
+          working = { ...working, orders: working.orders.map((o) => (o.id === id ? fixed : o)) };
+          await save(working);
+          fixedCount++;
+        } catch (e) {
+          pushLog(`  ${id} failed: ${e.message}`, "error");
+          skippedCount++;
+        }
+      }
+      pushLog(`Fix all complete: ${fixedCount} fixed, ${skippedCount} skipped.`, fixedCount ? "ok" : "warn");
+    } catch (e) {
+      pushLog("Fix all failed: " + e.message, "error");
+    } finally {
+      setSyncing(false);
+    }
+  }, [syncing, data, save, fetchFixedOrder]);
 
   /* ----- retry just the emails that previously errored out -----
      Complements sync()'s existing "re-read previously-empty orders" logic:
@@ -1034,6 +1175,15 @@ export default function App() {
           const target = oid && working.orders.find((o) => o.id === oid);
           if (target) {
             target.status = em.kind;
+            // The EMAIL's own date, not sync time — a Reconcile can apply a
+            // backlog of old status emails in one pass (or the app might
+            // just not be opened for a while), so "when we happened to
+            // process this" can be days after the real event. Used by
+            // arrivingCalendar's "Recently Delivered" (see deliveredAtFor
+            // in lib/derive.js) instead of updatedAt for exactly that
+            // reason — updatedAt still separately tracks sync/cloud-merge
+            // bookkeeping below and stays as-is for that purpose.
+            target.statusEmailAt = em.at || em.date || target.statusEmailAt;
             if (html) {
               const eta = extractEta(html);
               if (eta) target.eta = eta;
@@ -1121,7 +1271,7 @@ export default function App() {
 
   const activeOrders = useMemo(() => data.orders.filter((o) => isActiveStatus(o.status || "ordered")), [data.orders]);
   const activeItems = useMemo(() => allItems.filter((i) => isActiveStatus(i.status)), [allItems]);
-  const stats = useMemo(() => buildStats(data.orders, activeOrders, activeItems), [data.orders, activeOrders, activeItems]);
+  const stats = useMemo(() => buildStats(data.orders, activeOrders, activeItems, carrier), [data.orders, activeOrders, activeItems, carrier]);
   const review = useMemo(() => reviewQueue(data.orders), [data.orders]);
   const inTransit = useMemo(() => inTransitOrders(data.orders), [data.orders]);
 
@@ -1131,7 +1281,7 @@ export default function App() {
     syncing, sync, cancelSync,
     log, pushLog,
     failedEmails, retryFailedEmails, rereadOrder, testConnection,
-    unmatchedStatus, importMissingOrder, fixEstimatedPrices,
+    unmatchedStatus, importMissingOrder, fixEstimatedPrices, fixAllEstimatedPrices,
     googleSignedIn, handleGoogleSignIn, handleGoogleSignOut,
     apiKeyInput, setApiKeyInput, saveApiKey,
     thumbSize, updateThumbSize,
@@ -1143,12 +1293,16 @@ export default function App() {
     lightbox, setLightbox,
     layoutOverride, setLayoutOverride,
     cloudState, carrier,
+    openWelcome,
+    isAdmin, directory, directoryError, loadDirectory,
+    adminViewUid, adminViewState, adminViewLoading, viewUserData, exitAdminView,
   };
 
   return (
     <>
       {mode === "mobile" ? <MobileShell c={ctx} /> : <DesktopShell c={ctx} />}
       <Lightbox url={lightbox} onClose={() => setLightbox(null)} />
+      {showWelcome && <WelcomeModal onClose={closeWelcome} />}
     </>
   );
 }

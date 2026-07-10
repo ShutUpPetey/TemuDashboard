@@ -2,17 +2,20 @@ import React, { useMemo, useState } from "react";
 import {
   RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, Search, X,
   Settings2, Download, RotateCcw, Pencil, Save, Trash2, LayoutDashboard,
-  ReceiptText, Tags, BarChart3, Truck, ExternalLink,
+  ReceiptText, Tags, BarChart3, Truck, ExternalLink, CalendarDays, ShieldCheck,
 } from "lucide-react";
 import {
   CATEGORIES, STATUS_META, fmt, pct, isActiveStatus,
   StatusChip, CropThumb, annotateThumbs, Elapsed, Empty, LogPanel,
   carrierInfoFor, carrierEtaText, CARRIER_STATUS_LABEL,
 } from "./shared";
-import { sparkPoints, monthDelta, siblingOrders, matchesQuery, itemSearchIndex, orderSearchIndex } from "../lib/derive";
+import { sparkPoints, monthDelta, siblingOrders, matchesQuery, itemSearchIndex, orderSearchIndex, arrivingCalendar } from "../lib/derive";
 import { etaEndDate } from "../lib/gmail";
+import { estimateCostPerCall } from "../lib/anthropic";
 import SettingsPanel from "./SettingsPanel";
 import AnalyticsView from "./AnalyticsView";
+import ArrivingSoonView from "./ArrivingSoonView";
+import AdminPanel from "./AdminPanel";
 import ItemSheet from "./ItemSheet";
 import OrderSheet from "./OrderSheet";
 
@@ -35,6 +38,7 @@ export default function DesktopShell({ c }) {
 
   const reviewCount = c.review.estimatedItems.length + c.review.emptyOrders.length + c.failedEmails.length + c.unmatchedStatus.length;
   const delta = monthDelta(c.stats.monthData);
+  const overdueCount = useMemo(() => arrivingCalendar(c.data.orders, c.carrier, 14).overdueItems.length, [c.data.orders, c.carrier]);
 
   /* Open the order POPUP — the default way to view an order from anywhere
      (overview rows, item order-links, related-order chips, item sheet). */
@@ -112,13 +116,16 @@ export default function DesktopShell({ c }) {
 
   const NAV = [
     ["overview", "Overview", LayoutDashboard, null],
+    ["arriving", "Arriving soon", CalendarDays, overdueCount || null],
     ["orders", "Orders", ReceiptText, c.data.orders.length],
     ["items", "Items", Tags, c.allItems.length],
     ["analytics", "Analytics", BarChart3, null],
     ["review", "Needs review", AlertTriangle, reviewCount || null],
+    ...(c.isAdmin ? [["admin", "Admin", ShieldCheck, null]] : []),
     ["settings", "Settings", Settings2, null],
   ];
-  const TITLES = { overview: "Overview", orders: "Orders", items: "Items", analytics: "Analytics", review: "Needs review", settings: "Settings" };
+  const WARN_NAV = { review: reviewCount, arriving: overdueCount };
+  const TITLES = { overview: "Overview", arriving: "Arriving soon", orders: "Orders", items: "Items", analytics: "Analytics", review: "Needs review", admin: "Admin", settings: "Settings" };
 
   return (
     <div className="min-h-screen bg-stone-100 text-stone-900 flex" style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
@@ -136,9 +143,9 @@ export default function DesktopShell({ c }) {
         {NAV.map(([id, label, Icon, count]) => (
           <button key={id} onClick={() => setView(id)}
             className={`flex items-center gap-2.5 px-3 py-2 rounded-md text-[13px] font-medium text-left transition-colors ${view === id ? "bg-orange-600/20 text-orange-300" : "hover:bg-white/5"}`}>
-            <Icon size={15} className={id === "review" && reviewCount ? "text-amber-400" : ""} />
+            <Icon size={15} className={WARN_NAV[id] ? "text-amber-400" : ""} />
             {label}
-            {count != null && <span className={`ml-auto mono text-[11px] ${id === "review" ? "text-amber-400" : "text-stone-500"}`}>{count}</span>}
+            {count != null && <span className={`ml-auto mono text-[11px] ${WARN_NAV[id] ? "text-amber-400" : "text-stone-500"}`}>{count}</span>}
           </button>
         ))}
         <div className="mt-auto border-t border-stone-800 pt-3 px-2 text-[11px] text-stone-500 leading-relaxed">
@@ -199,6 +206,7 @@ export default function DesktopShell({ c }) {
           <LogPanel log={c.log} className="mb-4" />
 
           {view === "overview" && <Overview c={c} delta={delta} reviewCount={reviewCount} goView={setView} goOrder={openOrder} />}
+          {view === "arriving" && <ArrivingSoonView c={c} openItem={setSheetItem} />}
           {view === "orders" && (
             <OrdersView c={c} orders={filteredOrders} expanded={expanded} setExpanded={setExpanded} goOrder={openOrder} openItem={setSheetItem}
               orderStatusFilter={orderStatusFilter} setOrderStatusFilter={setOrderStatusFilter}
@@ -218,6 +226,7 @@ export default function DesktopShell({ c }) {
             </div>
           )}
           {view === "review" && <ReviewView c={c} goEditOrder={goEditOrder} />}
+          {view === "admin" && c.isAdmin && <AdminPanel c={c} />}
           {view === "settings" && (
             <div className="bg-stone-900 rounded-lg p-5 max-w-3xl"><SettingsPanel c={c} dark /></div>
           )}
@@ -370,6 +379,27 @@ function Kpi({ label, value, valueCls = "", sub, spark, sparkColor }) {
         </svg>
       ) : <div className="h-7 mt-2" />}
     </div>
+  );
+}
+
+/* "Fix all" — one click runs Try real prices for every order with an
+   estimated item, with a cost estimate shown up front (see
+   lib/anthropic.js → estimateCostPerCall: self-corrects from this
+   browser's own past fixEstimatedPrices calls once there's history). */
+function FixAllButton({ c, estimatedItems }) {
+  const orderIds = useMemo(() => [...new Set(estimatedItems.map((it) => it.orderId))], [estimatedItems]);
+  const cost = useMemo(() => estimateCostPerCall("fixPrices"), [estimatedItems]);
+  const total = cost.perCall * orderIds.length;
+  if (!orderIds.length) return null;
+  return (
+    <button onClick={c.fixAllEstimatedPrices} disabled={c.syncing}
+      title={cost.sampleSize > 0
+        ? `Estimated from your last ${cost.sampleSize} price fix(es) on this device`
+        : "Rough estimate (no fix history yet on this device) — refines automatically after your first fix"}
+      className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-700 border border-emerald-400 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1 rounded-md transition-colors disabled:opacity-40">
+      Fix all {orderIds.length} order{orderIds.length === 1 ? "" : "s"}
+      <span className="mono font-normal">(~{fmt(total)}, ~{fmt(cost.perCall)}/order)</span>
+    </button>
   );
 }
 
@@ -749,7 +779,7 @@ function ReviewView({ c, goEditOrder }) {
 
       {estimatedItems.length > 0 && (
         <div className="bg-white border border-stone-200 rounded-lg overflow-hidden">
-          <PanelHead title={`Estimated prices (${estimatedItems.length})`} />
+          <PanelHead title={`Estimated prices (${estimatedItems.length})`} action={<FixAllButton c={c} estimatedItems={estimatedItems} />} />
           <div className="px-4 py-2 text-[12.5px] text-stone-500 border-b border-stone-100">
             From split-order emails with no per-item price — the order total was split evenly. <b>Try real prices</b> re-reads a shipped/delivered email for that order, which carries the real priced receipt (1 vision call); <b>Fix price</b> edits by hand.
           </div>
