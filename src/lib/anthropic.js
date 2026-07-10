@@ -86,6 +86,58 @@ export function textOf(resp) {
   return (resp.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
 }
 
+/* ============================================================
+   Cost estimation for bulk vision-call actions (e.g. "Fix all
+   estimated prices" in the Review queue).
+
+   List pricing for claude-sonnet-5 as of this writing — deliberately
+   NOT the temporary intro pricing (~33% cheaper through 2026-08-31),
+   so this constant stays correct indefinitely instead of quietly
+   under-estimating once the intro period ends. Real charges may be
+   somewhat lower than this estimate until then.
+   ============================================================ */
+const PRICE_PER_MTOK_INPUT = 3.0;
+const PRICE_PER_MTOK_OUTPUT = 15.0;
+const USAGE_LOG_KEY = "temu-anthropic-usage-log";
+const USAGE_LOG_MAX = 30;
+
+function costUSD(inputTokens, outputTokens) {
+  return (inputTokens / 1e6) * PRICE_PER_MTOK_INPUT + (outputTokens / 1e6) * PRICE_PER_MTOK_OUTPUT;
+}
+
+/* Call after every real API call whose cost is worth estimating later.
+   `tag` scopes the rolling log to one call "shape" (prompt + image count
+   pattern) so averaging stays meaningful — e.g. fixEstimatedPrices calls
+   shouldn't be averaged together with the very different order-parsing
+   calls. Keeps only the last USAGE_LOG_MAX entries per tag combined. */
+export function recordUsage(tag, usage) {
+  if (!usage) return;
+  try {
+    const log = JSON.parse(localStorage.getItem(USAGE_LOG_KEY) || "[]");
+    log.push({ tag, input: usage.input_tokens || 0, output: usage.output_tokens || 0, at: Date.now() });
+    localStorage.setItem(USAGE_LOG_KEY, JSON.stringify(log.slice(-USAGE_LOG_MAX)));
+  } catch { /* best-effort — losing the log just means falling back to the default estimate */ }
+}
+
+/* Average $/call for `tag`, computed from this browser's own real past
+   calls once there are any (self-correcting — adapts to how big/complex
+   this user's actual orders are), else `fallbackUSD` (the user's own
+   observed real-world cost, per order, is a reasonable starting point
+   before any history exists). Returns sampleSize so callers can show
+   "estimated from N past calls" vs. "rough estimate". */
+export function estimateCostPerCall(tag, fallbackUSD = 0.01) {
+  try {
+    const log = JSON.parse(localStorage.getItem(USAGE_LOG_KEY) || "[]");
+    const matches = log.filter((e) => e.tag === tag);
+    if (!matches.length) return { perCall: fallbackUSD, sampleSize: 0 };
+    const avgInput = matches.reduce((s, e) => s + e.input, 0) / matches.length;
+    const avgOutput = matches.reduce((s, e) => s + e.output, 0) / matches.length;
+    return { perCall: costUSD(avgInput, avgOutput), sampleSize: matches.length };
+  } catch {
+    return { perCall: fallbackUSD, sampleSize: 0 };
+  }
+}
+
 export function extractJSON(resp) {
   const raw = textOf(resp).replace(/```json|```/g, "").trim();
   const start = raw.indexOf("{");
