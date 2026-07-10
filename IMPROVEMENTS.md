@@ -328,6 +328,13 @@ Every `save()` serializes and pushes the *entire* state (all orders, images, the
 **Source:** Data/sync review
 **Fix risk:** MEDIUM (real storage-shape migration; `processedIds` pruning alone is LOW) · **Effort:** L
 
+### IMP-037 — Fully-free orders (coupon + credit = $0.00 total) priced items at full list price
+**Priority:** P1 · **Status:** Fixed
+> Fixed 2026-07-10 (evening) — found by Matt with a real order: a $29.99-list item fully covered by a $5 coupon + $5.92 account credit (order total $0.00, credit covering shipping and tax too). `applyDiscounts` computes `netMerch = total − shipping − tax` = −$3.11, and the old factor guard (`netMerch >= 0 ? … : 1`) treated any negative net as suspect data and bailed to factor 1 — pricing the free item as paid-full-list ($29.99) with 0% discount and inflating spend stats by the whole list amount. Fix: clamp instead of bail — `factor = min(max(netMerch, 0) / base, 1.5)` — so a covered order prices its items at $0.00 with −100% discount. Existing stored orders need a per-order ↺ Re-read (one vision call) to recompute.
+**Affected files:** `src/lib/discounts.js` (factor computation)
+**Source:** user report (post-deploy testing)
+**Fix risk:** LOW · **Effort:** S
+
 ---
 
 ## Bigger ideas / future features

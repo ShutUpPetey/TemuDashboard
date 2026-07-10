@@ -65,7 +65,13 @@ export function applyDiscounts(order) {
     return order;
   }
 
-  const factor = base > 0 && netMerch >= 0 ? Math.min(netMerch / base, 1.5) : 1;
+  // netMerch can be legitimately ≤ 0: an order fully covered by coupon +
+  // account credit charges $0.00 total (and the credit may cover shipping
+  // and tax too, making total − shipping − tax negative). The per-item
+  // paid really is $0.00 there — clamp the factor at 0 instead of bailing
+  // to factor 1, which used to display a free item as paid-full-list-price
+  // and inflate spend stats by the entire list amount.
+  const factor = base > 0 ? Math.min(Math.max(netMerch, 0) / base, 1.5) : 1;
   order.discountFactor = factor;
   items.forEach((it) => {
     it.paid = +((it.listed || 0) * factor).toFixed(2);
