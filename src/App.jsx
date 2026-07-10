@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import { storage } from "./lib/storage";
 import { downloadCsv, itemsCsv, ordersCsv } from "./lib/exportCsv";
 import { applyDiscounts } from "./lib/discounts";
-import { callClaude, cancelCurrentCall, textOf, extractJSON, getApiKey, setApiKey } from "./lib/anthropic";
+import { callClaude, cancelCurrentCall, textOf, extractJSON, getApiKey, setApiKey, recordUsage, estimateCostPerCall } from "./lib/anthropic";
 import { getToken, getStoredToken, isSignedIn, signIn, signOut } from "./lib/gis";
 import { cloudConfigured, cloudSignIn, cloudSignOut, cloudGet, cloudSet, cloudSubscribe, cloudSubscribeCarrier } from "./lib/firebase";
 import {
@@ -694,9 +694,75 @@ export default function App() {
      has real per-item prices. This finds one such email, re-runs the normal
      (non-split) vision parse against its images, and replaces the order's
      estimated items with the real numbers. Manual only (costs one vision
-     call) — triggered from the Review queue's "Estimated prices" list. The
+     call) — triggered from the Review queue's "Estimated prices" list, either
+     one order at a time or all at once (see fixAllEstimatedPrices below). The
      result is marked manualEdit so a later re-read of the (still priceless)
-     split confirmation can't silently revert it back to an estimate. */
+     split confirmation can't silently revert it back to an estimate.
+
+     fetchFixedOrder is the shared core — it takes an order OBJECT (not an
+     id looked up from React state) so the bulk loop below can thread its own
+     in-progress working copy through repeated calls without racing React's
+     async state updates. It doesn't touch data/save/syncing itself; callers
+     own that. */
+  const fetchFixedOrder = useCallback(async (order, token) => {
+    const msgs = await searchMessages(
+      `from:transaction.temu.com subject:(shipped OR delivered OR arrived OR "transferred to" OR delivery) "${order.id}"`,
+      token, 10
+    );
+    let html = null;
+    for (const m of msgs) {
+      try {
+        const fullMsg = await getMessageFull(m.id, token);
+        const h = extractHtml(fullMsg.payload);
+        if (extractSection(h, "goods_list") && extractSection(h, "order_pay_info_row")) { html = h; break; }
+      } catch { /* try next candidate */ }
+    }
+    if (!html) return { error: "no-status-email" };
+    const goods = extractImgSrcs(extractSection(html, "goods_list")).filter((u) => /^https?:\/\//.test(u));
+    const pay = extractImgSrcs(extractSection(html, "order_pay_info_row")).filter((u) => /^https?:\/\//.test(u));
+    if (!goods.length) return { error: "no-item-image" };
+    const urls = [...goods, ...pay];
+    // Orders re-consolidated from a split-purchase sub-order can run to
+    // 15-20+ items — the default 2000-token budget (see anthropic.js)
+    // truncated the JSON mid-response for a real case like this. Full
+    // item + price + category JSON for a big order needs more headroom.
+    const resp = await callClaude([
+      ...urls.map((u) => ({ type: "image", source: { type: "url", url: u } })),
+      {
+        type: "text",
+        text:
+          `The first ${goods.length} image(s) show the purchased items of a Temu order — one row per item: product photo on the left, then name, quantity, price. ` +
+          `The remaining ${pay.length} image(s) show the payment summary. ` +
+          `Respond with ONLY compact single-line JSON, no prose: ` +
+          `{"subtotal":0,"discount":0,"shipping":0,"tax":0,"total":0,` +
+          `"items":[{"n":"short name max 8 words","listed":0,"qty":1,"c":"cat","gi":0,"y":50}]}. ` +
+          `"discount" = sum of all discount/coupon/credit lines as a positive number; "total" = amount actually charged; use null for anything not visible. ` +
+          `"gi" = 0-based index of which items image the row is in; "y" = vertical center of that item's row within its image, as an integer percent (0=top, 100=bottom). ` +
+          `"c" must be one of: ${CATEGORIES.join(", ")}.`,
+      },
+    ], { maxTokens: 4000 });
+    recordUsage("fixPrices", resp.usage);
+    const parsed = extractJSON(resp);
+    const fixed = applyDiscounts({
+      ...order,
+      subtotal: parsed.subtotal ?? order.subtotal,
+      discount: parsed.discount ?? order.discount,
+      shipping: parsed.shipping ?? order.shipping,
+      tax: parsed.tax ?? order.tax,
+      total: parsed.total ?? order.total,
+      items: (parsed.items || []).map((it) => ({
+        name: it.n, listed: it.listed, qty: it.qty || 1,
+        category: CATEGORIES.includes(it.c) ? it.c : "Other",
+        thumbUrl: goods[it.gi || 0] || goods[0] || null,
+        thumbY: Number.isFinite(it.y) ? Math.max(0, Math.min(100, it.y)) : null,
+      })),
+      images: urls,
+      manualEdit: true,
+      updatedAt: Date.now(), // per-order timestamp for cloud merge (lib/syncMerge.js)
+    });
+    return { fixed };
+  }, []);
+
   const fixEstimatedPrices = useCallback(async (orderId) => {
     if (syncing) return;
     const order = data.orders.find((o) => o.id === orderId);
@@ -707,66 +773,15 @@ export default function App() {
       const token = await getToken({ interactive: true });
       setGoogleSignedIn(true);
       pushLog(`Looking for a shipped/delivered email for ${orderId} with real prices…`);
-      const msgs = await searchMessages(
-        `from:transaction.temu.com subject:(shipped OR delivered OR arrived OR "transferred to" OR delivery) "${orderId}"`,
-        token, 10
-      );
-      let html = null;
-      for (const m of msgs) {
-        try {
-          const fullMsg = await getMessageFull(m.id, token);
-          const h = extractHtml(fullMsg.payload);
-          if (extractSection(h, "goods_list") && extractSection(h, "order_pay_info_row")) { html = h; break; }
-        } catch { /* try next candidate */ }
-      }
-      if (!html) {
+      const { fixed, error } = await fetchFixedOrder(order, token);
+      if (error === "no-status-email") {
         pushLog(`No status email with a priced receipt image was found for ${orderId}.`, "warn");
         return;
       }
-      const goods = extractImgSrcs(extractSection(html, "goods_list")).filter((u) => /^https?:\/\//.test(u));
-      const pay = extractImgSrcs(extractSection(html, "order_pay_info_row")).filter((u) => /^https?:\/\//.test(u));
-      if (!goods.length) {
+      if (error === "no-item-image") {
         pushLog(`Found a status email for ${orderId} but couldn't find its item image.`, "warn");
         return;
       }
-      pushLog(`Re-reading ${orderId}'s real prices from its status email…`);
-      const urls = [...goods, ...pay];
-      // Orders re-consolidated from a split-purchase sub-order can run to
-      // 15-20+ items — the default 2000-token budget (see anthropic.js)
-      // truncated the JSON mid-response for a real case like this. Full
-      // item + price + category JSON for a big order needs more headroom.
-      const parsed = extractJSON(await callClaude([
-        ...urls.map((u) => ({ type: "image", source: { type: "url", url: u } })),
-        {
-          type: "text",
-          text:
-            `The first ${goods.length} image(s) show the purchased items of a Temu order — one row per item: product photo on the left, then name, quantity, price. ` +
-            `The remaining ${pay.length} image(s) show the payment summary. ` +
-            `Respond with ONLY compact single-line JSON, no prose: ` +
-            `{"subtotal":0,"discount":0,"shipping":0,"tax":0,"total":0,` +
-            `"items":[{"n":"short name max 8 words","listed":0,"qty":1,"c":"cat","gi":0,"y":50}]}. ` +
-            `"discount" = sum of all discount/coupon/credit lines as a positive number; "total" = amount actually charged; use null for anything not visible. ` +
-            `"gi" = 0-based index of which items image the row is in; "y" = vertical center of that item's row within its image, as an integer percent (0=top, 100=bottom). ` +
-            `"c" must be one of: ${CATEGORIES.join(", ")}.`,
-        },
-      ], { maxTokens: 4000 }));
-      const fixed = applyDiscounts({
-        ...order,
-        subtotal: parsed.subtotal ?? order.subtotal,
-        discount: parsed.discount ?? order.discount,
-        shipping: parsed.shipping ?? order.shipping,
-        tax: parsed.tax ?? order.tax,
-        total: parsed.total ?? order.total,
-        items: (parsed.items || []).map((it) => ({
-          name: it.n, listed: it.listed, qty: it.qty || 1,
-          category: CATEGORIES.includes(it.c) ? it.c : "Other",
-          thumbUrl: goods[it.gi || 0] || goods[0] || null,
-          thumbY: Number.isFinite(it.y) ? Math.max(0, Math.min(100, it.y)) : null,
-        })),
-        images: urls,
-        manualEdit: true,
-        updatedAt: Date.now(), // per-order timestamp for cloud merge (lib/syncMerge.js)
-      });
       await save({ ...data, orders: data.orders.map((o) => (o.id === orderId ? fixed : o)) });
       pushLog(`✓ ${orderId}: replaced estimated prices with real ones from its status email.`, "ok");
     } catch (e) {
@@ -774,7 +789,61 @@ export default function App() {
     } finally {
       setSyncing(false);
     }
-  }, [syncing, data, save]);
+  }, [syncing, data, save, fetchFixedOrder]);
+
+  /* ----- fix ALL estimated prices in one pass -----
+     Same one-vision-call-per-order mechanism as fixEstimatedPrices, just
+     looped across every order currently in the Review queue's "Estimated
+     prices" bucket — one order can have several estimated ITEMS, so this
+     dedupes to unique order IDs first (that's the actual API-call count and
+     what the cost estimate in the UI is based on, via estimateCostPerCall in
+     lib/anthropic.js). Reuses the same syncing/cancel machinery as every
+     other bulk operation (sync, Reconcile, retry-failed) so the existing
+     progress banner + Cancel button just work. Saves after each order
+     (not just at the end) so a cancel or a crash partway through keeps
+     whatever was already fixed. */
+  const fixAllEstimatedPrices = useCallback(async () => {
+    if (syncing) return;
+    // computed fresh from data.orders (not the `review` memo below) so this
+    // doesn't have to be declared after it in the component body
+    const orderIds = [...new Set(reviewQueue(data.orders).estimatedItems.map((it) => it.orderId))];
+    if (!orderIds.length) return;
+    setSyncing(true);
+    cancelRequestedRef.current = false;
+    pushLog(`Fixing estimated prices for ${orderIds.length} order(s)…`);
+    let working = { ...data, orders: [...data.orders] };
+    let fixedCount = 0, skippedCount = 0;
+    try {
+      const token = await getToken({ interactive: true });
+      setGoogleSignedIn(true);
+      for (let i = 0; i < orderIds.length; i++) {
+        if (cancelRequestedRef.current) { pushLog(`Fix all cancelled after ${i}/${orderIds.length}.`, "warn"); break; }
+        const id = orderIds[i];
+        const order = working.orders.find((o) => o.id === id);
+        if (!order) continue;
+        pushLog(`${i + 1}/${orderIds.length}: ${id}…`);
+        try {
+          const { fixed, error } = await fetchFixedOrder(order, token);
+          if (error) {
+            pushLog(`  skipped ${id}: ${error === "no-status-email" ? "no priced status email found" : "no item image in status email"}`, "warn");
+            skippedCount++;
+            continue;
+          }
+          working = { ...working, orders: working.orders.map((o) => (o.id === id ? fixed : o)) };
+          await save(working);
+          fixedCount++;
+        } catch (e) {
+          pushLog(`  ${id} failed: ${e.message}`, "error");
+          skippedCount++;
+        }
+      }
+      pushLog(`Fix all complete: ${fixedCount} fixed, ${skippedCount} skipped.`, fixedCount ? "ok" : "warn");
+    } catch (e) {
+      pushLog("Fix all failed: " + e.message, "error");
+    } finally {
+      setSyncing(false);
+    }
+  }, [syncing, data, save, fetchFixedOrder]);
 
   /* ----- retry just the emails that previously errored out -----
      Complements sync()'s existing "re-read previously-empty orders" logic:
@@ -1083,7 +1152,7 @@ export default function App() {
     syncing, sync, cancelSync,
     log, pushLog,
     failedEmails, retryFailedEmails, rereadOrder, testConnection,
-    unmatchedStatus, importMissingOrder, fixEstimatedPrices,
+    unmatchedStatus, importMissingOrder, fixEstimatedPrices, fixAllEstimatedPrices,
     googleSignedIn, handleGoogleSignIn, handleGoogleSignOut,
     apiKeyInput, setApiKeyInput, saveApiKey,
     thumbSize, updateThumbSize,

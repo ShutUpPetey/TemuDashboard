@@ -11,6 +11,7 @@ import {
 } from "./shared";
 import { sparkPoints, monthDelta, siblingOrders, matchesQuery, itemSearchIndex, orderSearchIndex, arrivingCalendar } from "../lib/derive";
 import { etaEndDate } from "../lib/gmail";
+import { estimateCostPerCall } from "../lib/anthropic";
 import SettingsPanel from "./SettingsPanel";
 import AnalyticsView from "./AnalyticsView";
 import ArrivingSoonView from "./ArrivingSoonView";
@@ -375,6 +376,27 @@ function Kpi({ label, value, valueCls = "", sub, spark, sparkColor }) {
         </svg>
       ) : <div className="h-7 mt-2" />}
     </div>
+  );
+}
+
+/* "Fix all" — one click runs Try real prices for every order with an
+   estimated item, with a cost estimate shown up front (see
+   lib/anthropic.js → estimateCostPerCall: self-corrects from this
+   browser's own past fixEstimatedPrices calls once there's history). */
+function FixAllButton({ c, estimatedItems }) {
+  const orderIds = useMemo(() => [...new Set(estimatedItems.map((it) => it.orderId))], [estimatedItems]);
+  const cost = useMemo(() => estimateCostPerCall("fixPrices"), [estimatedItems]);
+  const total = cost.perCall * orderIds.length;
+  if (!orderIds.length) return null;
+  return (
+    <button onClick={c.fixAllEstimatedPrices} disabled={c.syncing}
+      title={cost.sampleSize > 0
+        ? `Estimated from your last ${cost.sampleSize} price fix(es) on this device`
+        : "Rough estimate (no fix history yet on this device) — refines automatically after your first fix"}
+      className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-700 border border-emerald-400 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1 rounded-md transition-colors disabled:opacity-40">
+      Fix all {orderIds.length} order{orderIds.length === 1 ? "" : "s"}
+      <span className="mono font-normal">(~{fmt(total)}, ~{fmt(cost.perCall)}/order)</span>
+    </button>
   );
 }
 
@@ -748,7 +770,7 @@ function ReviewView({ c, goEditOrder }) {
 
       {estimatedItems.length > 0 && (
         <div className="bg-white border border-stone-200 rounded-lg overflow-hidden">
-          <PanelHead title={`Estimated prices (${estimatedItems.length})`} />
+          <PanelHead title={`Estimated prices (${estimatedItems.length})`} action={<FixAllButton c={c} estimatedItems={estimatedItems} />} />
           <div className="px-4 py-2 text-[12.5px] text-stone-500 border-b border-stone-100">
             From split-order emails with no per-item price — the order total was split evenly. <b>Try real prices</b> re-reads a shipped/delivered email for that order, which carries the real priced receipt (1 vision call); <b>Fix price</b> edits by hand.
           </div>

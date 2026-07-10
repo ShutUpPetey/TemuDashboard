@@ -8,6 +8,7 @@ import {
   carrierInfoFor, carrierEtaText,
 } from "./shared";
 import { siblingOrders, matchesQuery, itemSearchIndex, orderSearchIndex, arrivingCalendar } from "../lib/derive";
+import { estimateCostPerCall } from "../lib/anthropic";
 import SettingsPanel from "./SettingsPanel";
 import AnalyticsView from "./AnalyticsView";
 import ArrivingSoonView from "./ArrivingSoonView";
@@ -327,6 +328,7 @@ export default function MobileShell({ c }) {
               </div>
             </div>
           )}
+          {c.review.estimatedItems.length > 0 && !c.syncing && <FixAllBanner c={c} />}
           <div className="bg-white border border-stone-200 rounded-xl p-4">
             <SettingsPanel c={c} dark={false} />
           </div>
@@ -367,6 +369,25 @@ export default function MobileShell({ c }) {
         </div>
       </nav>
     </div>
+  );
+}
+
+/* "Fix all" — mobile equivalent of DesktopShell's FixAllButton. Mobile has
+   no dedicated Review list (estimated items are reached via the "⚠ Review"
+   chip on Items + ItemSheet's per-item "Try real prices"), so this banner in
+   Settings is the bulk entry point — one click, cost estimated up front from
+   this device's own past fixes (lib/anthropic.js → estimateCostPerCall). */
+function FixAllBanner({ c }) {
+  const orderIds = useMemo(() => [...new Set(c.review.estimatedItems.map((it) => it.orderId))], [c.review.estimatedItems]);
+  const cost = useMemo(() => estimateCostPerCall("fixPrices"), [c.review.estimatedItems]);
+  const total = cost.perCall * orderIds.length;
+  if (!orderIds.length) return null;
+  return (
+    <button onClick={c.fixAllEstimatedPrices}
+      className="w-full flex items-center justify-between gap-2 bg-emerald-50 border border-emerald-300 text-emerald-800 rounded-xl px-4 py-3 text-sm font-semibold">
+      <span>Fix all {orderIds.length} estimated price{orderIds.length === 1 ? "" : "s"}</span>
+      <span className="mono text-xs font-normal">~{fmt(total)}</span>
+    </button>
   );
 }
 
