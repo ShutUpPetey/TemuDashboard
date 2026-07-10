@@ -77,13 +77,25 @@ function deliveredAtFor(order, carrierMap) {
   return order.date ? new Date(order.date) : null;
 }
 
-/* Buckets every non-delivered, non-cancelled/returned item onto a 14-day
-   forward calendar (today..today+days-1) for the "Arriving Soon" view.
-   carrierMap is the same manifest/{uid}/carrier/{trackingNumber} data
-   App.jsx already subscribes to and passes around as `c.carrier`.
+/* Buckets every non-delivered, non-cancelled/returned item onto a forward
+   calendar for the "Arriving Soon" view. carrierMap is the same
+   manifest/{uid}/carrier/{trackingNumber} data App.jsx already subscribes
+   to and passes around as `c.carrier`.
+
+   The grid always starts on a Sunday and ends on a Saturday — like an
+   actual calendar, so a given column is always the same weekday in every
+   row — which means it covers a FEW MORE days than `days`: back to this
+   week's Sunday (even if that's slightly before today) and forward to the
+   Saturday that completes the week containing today+days-1. Those leading
+   pre-today cells are real calendar days for alignment only — nothing is
+   ever bucketed into them, they just render empty (an overdue item still
+   only shows in overdueItems, not also on its original past due-date).
 
    Returns:
-   - calendar: [{date: "YYYY-MM-DD", items: [...]}, ...] for the visible window
+   - calendar: [{date, items, past}, ...] for the visible (grid) window —
+     `past` marks cells before today, for muting them in the UI
+   - today: "YYYY-MM-DD" for today — NOT necessarily calendar[0].date now
+     that the grid can lead with a few pre-today days
    - overdueItems: items whose expected date has passed without a Delivered
      carrier status — may reference dates OUTSIDE the visible window
    - noEstimateItems: shipped items with no carrier data and no parseable
@@ -96,13 +108,26 @@ function deliveredAtFor(order, carrierMap) {
 export function arrivingCalendar(orders, carrierMap = {}, days = 14) {
   const start = new Date();
   start.setHours(0, 0, 0, 0);
-  const dayList = Array.from({ length: days }, (_, i) => {
-    const d = new Date(start);
+  const today = asDay(start);
+
+  const gridStart = new Date(start);
+  gridStart.setDate(gridStart.getDate() - gridStart.getDay()); // back to Sunday
+  const rangeEnd = new Date(start);
+  rangeEnd.setDate(rangeEnd.getDate() + days - 1);
+  const gridEnd = new Date(rangeEnd);
+  gridEnd.setDate(gridEnd.getDate() + (6 - gridEnd.getDay())); // forward to Saturday
+  const totalDays = Math.round((gridEnd - gridStart) / 86400000) + 1;
+
+  const dayList = Array.from({ length: totalDays }, (_, i) => {
+    const d = new Date(gridStart);
     d.setDate(d.getDate() + i);
     return d.toISOString().slice(0, 10);
   });
-  const today = dayList[0];
-  const windowSet = new Set(dayList);
+  // Only today-forward days actually hold items — the leading pre-today
+  // days that complete this week are pure calendar filler (an overdue
+  // item still only shows in overdueItems, not duplicated onto its
+  // original past due-date here).
+  const windowSet = new Set(dayList.filter((d) => d >= today));
   const perDay = Object.fromEntries(dayList.map((d) => [d, []]));
 
   const overdueItems = [];
@@ -153,7 +178,8 @@ export function arrivingCalendar(orders, carrierMap = {}, days = 14) {
   recentlyDelivered.sort((a, b) => b.deliveredAt.localeCompare(a.deliveredAt));
 
   return {
-    calendar: dayList.map((date) => ({ date, items: perDay[date] })),
+    calendar: dayList.map((date) => ({ date, items: perDay[date], past: date < today })),
+    today,
     overdueItems,
     noEstimateItems,
     recentlyDelivered,

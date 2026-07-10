@@ -17,7 +17,7 @@ import { arrivingCalendar, isActiveStatus } from "../lib/derive";
    the grid which needs every day for its fixed layout) and renders
    full-width tap targets. */
 export default function ArrivingSoonView({ c, openItem, mobile = false }) {
-  const { calendar, overdueItems, noEstimateItems, recentlyDelivered } = useMemo(
+  const { calendar, today: todayStr, overdueItems, noEstimateItems, recentlyDelivered } = useMemo(
     () => arrivingCalendar(c.data.orders, c.carrier, 14),
     [c.data.orders, c.carrier]
   );
@@ -36,7 +36,6 @@ export default function ArrivingSoonView({ c, openItem, mobile = false }) {
   }, [c.data.orders]);
 
   const itemsArriving = calendar.reduce((s, day) => s + day.items.length, 0);
-  const todayStr = calendar[0]?.date;
 
   if (c.data.orders.length === 0) return <Empty syncing={c.syncing} />;
 
@@ -264,13 +263,13 @@ function DayCell({ day, today, openItem, setLightbox }) {
   const shown = items.slice(0, MAX_PER_DAY);
   const extra = items.length - shown.length;
   return (
-    <div className={`border-b border-r border-stone-100 p-2 min-h-[136px] ${today ? "ring-2 ring-inset ring-orange-400 bg-orange-50/30" : ""}`}>
+    <div className={`border-b border-r border-stone-100 p-2 min-h-[136px] ${today ? "ring-2 ring-inset ring-orange-400 bg-orange-50/30" : ""} ${day.past ? "bg-stone-50/60" : ""}`}>
       <div className="flex items-baseline justify-between mb-1.5">
-        <span className={`text-[10px] font-semibold uppercase tracking-wide ${today ? "text-orange-600" : "text-stone-400"}`}>{DOW[d.getDay()]}</span>
-        <span className={`mono text-[11px] ${today ? "text-orange-700 font-bold" : "text-stone-500"}`}>{day.date.slice(5)}</span>
+        <span className={`text-[10px] font-semibold uppercase tracking-wide ${today ? "text-orange-600" : day.past ? "text-stone-300" : "text-stone-400"}`}>{DOW[d.getDay()]}</span>
+        <span className={`mono text-[11px] ${today ? "text-orange-700 font-bold" : day.past ? "text-stone-300" : "text-stone-500"}`}>{day.date.slice(5)}</span>
       </div>
       {items.length === 0 ? (
-        <div className="text-[10.5px] text-stone-300 italic pt-3 text-center select-none">—</div>
+        day.past ? null : <div className="text-[10.5px] text-stone-300 italic pt-3 text-center select-none">—</div>
       ) : (
         <div className="flex flex-wrap gap-1.5">
           {shown.map((it, i) => (
