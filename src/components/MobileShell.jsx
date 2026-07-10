@@ -188,7 +188,7 @@ export default function MobileShell({ c }) {
             </div>
           </div>
           {rows.length === 0 ? (
-            <div className="px-4"><Empty syncing={c.syncing} /></div>
+            <div className="px-4"><Empty syncing={c.syncing} loaded={c.loaded} /></div>
           ) : (
             <div className="grid grid-cols-2 gap-3 px-4">
               {rows.map((it, i) => (
@@ -212,7 +212,7 @@ export default function MobileShell({ c }) {
               ))}
             </div>
           </div>
-          {c.data.orders.length === 0 ? <Empty syncing={c.syncing} /> :
+          {c.data.orders.length === 0 ? <Empty syncing={c.syncing} loaded={c.loaded} /> :
             filteredOrders.length === 0 ? (
               <div className="text-center text-stone-400 text-[13px] py-10">No orders match.</div>
             ) :

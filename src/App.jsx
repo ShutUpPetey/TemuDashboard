@@ -5,7 +5,7 @@ import { downloadCsv, itemsCsv, ordersCsv } from "./lib/exportCsv";
 import { applyDiscounts } from "./lib/discounts";
 import { callClaude, cancelCurrentCall, textOf, extractJSON, getApiKey, setApiKey } from "./lib/anthropic";
 import { getToken, getStoredToken, isSignedIn, signIn, signOut } from "./lib/gis";
-import { cloudConfigured, cloudSignIn, cloudSignOut, cloudGet, cloudSet, cloudSubscribe, cloudSubscribeCarrier } from "./lib/firebase";
+import { cloudConfigured, cloudSignIn, cloudSignOut, cloudGet, cloudSet, cloudSubscribe, cloudSubscribeCarrier, cloudClockSkew } from "./lib/firebase";
 import {
   searchMessages, getMessageMetadata, getMessageFull, headerValue,
   extractHtml, extractSection, extractAllSections, extractImgSrcs, extractPoNumber, extractSubOrders,
@@ -57,10 +57,11 @@ export default function App() {
   const [cloudState, setCloudState] = useState(() => (cloudConfigured() ? "off" : "unconfigured"));
   const [carrier, setCarrier] = useState({}); // trackingNumber → live 17TRACK info (from the GitHub Action)
   const cloudReadyRef = useRef(false);      // gate write-through in save()
-  const cloudConnectingRef = useRef(false); // connect() is idempotent
+  const cloudConnectRef = useRef(null);     // the in-flight/settled connect() promise — idempotent AND awaitable
   const cloudUnsubRef = useRef(null);
   const cloudCarrierUnsubRef = useRef(null);
-  const dataRef = useRef(null);             // latest data, for callbacks
+  const dataRef = useRef(null);             // latest data, for callbacks — written SYNCHRONOUSLY at every mutation (see save)
+  const pendingRemoteRef = useRef(null);    // remote payload that arrived mid-sync, replayed when the sync ends
   const syncingRef = useRef(false);
 
   // 400 lines so a full Reconcile's failures don't scroll away; the log
@@ -98,6 +99,13 @@ export default function App() {
   const save = useCallback(async (next) => {
     // updatedAt is the whole-blob version for cloud newest-wins resolution.
     const stamped = { ...next, updatedAt: Date.now() };
+    // dataRef is written synchronously (not just via the post-render effect)
+    // so two mutations in the same tick — e.g. two quick edits, or a save
+    // racing the carrier-promote effect — build on each other instead of
+    // both building on the same stale render closure and one silently
+    // dropping the other. Mutation handlers read dataRef.current, never
+    // the `data` closure, for the same reason.
+    dataRef.current = stamped;
     setData(stamped);
     const json = JSON.stringify(stamped);
     try { await storage.set(STORAGE_KEY, json); }
@@ -107,75 +115,113 @@ export default function App() {
     }
   }, []);
 
+  /* Apply a remote cloud payload to local state via the per-order merge.
+     Shared by the live listener and by the after-sync replay of a payload
+     that arrived while a sync was running. */
+  const applyRemote = useCallback((val, note) => {
+    try {
+      const parsed = JSON.parse(val.json);
+      const localNow = dataRef.current || {};
+      const merged = mergeState(localNow, parsed);
+      if (sameOrderSet(merged.orders, localNow.orders || [])) return; // our own echo, or nothing new
+      dataRef.current = merged; // synchronous, so callbacks never see pre-merge state
+      setData(merged);
+      storage.set(STORAGE_KEY, JSON.stringify(merged)).catch(() => {});
+      if (remoteIsStale(merged.orders, parsed.orders)) {
+        cloudSet(JSON.stringify(merged), merged.updatedAt).catch(() => {});
+      }
+      pushLog(note, "ok");
+    } catch { /* malformed remote payload — ignore */ }
+  }, []);
+
   /* Connect the optional Firebase layer using the SAME Google access token
      the app already holds for Gmail. Pull-newer on connect, then live
-     listener. Idempotent — called from every place a token shows up. */
-  const connectCloud = useCallback(async (token) => {
-    if (!cloudConfigured() || !token || cloudConnectingRef.current) return;
-    cloudConnectingRef.current = true;
-    setCloudState("connecting");
-    try {
-      await cloudSignIn(token);
-      const remote = await cloudGet();
-      const local = dataRef.current || {};
-      if (remote?.json) {
-        // Per-order merge (see lib/syncMerge.js), NOT "newest blob wins" —
-        // a stale device's save could otherwise clobber a fresher edit
-        // made on another device to a completely different order (e.g. a
-        // "Try real prices" fix vanishing after refresh because some
-        // unrelated save on another device raced it with a newer top-
-        // level timestamp). Each order carries its own updatedAt, so the
-        // merge keeps whichever copy of EACH order is actually newer and
-        // takes the union of both order lists — nothing is lost.
-        const parsed = JSON.parse(remote.json);
-        const merged = mergeState(local, parsed);
-        setData(merged);
-        storage.set(STORAGE_KEY, JSON.stringify(merged)).catch(() => {});
-        if (remoteIsStale(merged.orders, parsed.orders)) {
-          // Remote was missing something local had, or had an older copy
-          // of some order — push the merged truth back so both sides
-          // converge instead of staying split.
-          await cloudSet(JSON.stringify(merged), merged.updatedAt).catch(() => {});
-        }
-        pushLog(`Cloud: merged with Firebase (${merged.orders.length} order(s) total).`, "ok");
-      } else if (local.orders?.length || local.updatedAt) {
-        await cloudSet(JSON.stringify(local), local.updatedAt || Date.now());
-        pushLog("Cloud: uploaded local data to Firebase.", "ok");
-      }
-      cloudUnsubRef.current = await cloudSubscribe((val) => {
-        if (!val?.json) return;
-        if (syncingRef.current) {
-          // A sync is writing from its own snapshot — merge on the next
-          // connect/subscribe tick instead of mid-sync, to avoid a
-          // half-applied merge racing the sync loop's own saves.
-          pushLog("Cloud: remote change arrived mid-sync — will merge once this sync finishes.", "warn");
-          return;
-        }
-        try {
-          const parsed = JSON.parse(val.json);
-          const localNow = dataRef.current || {};
-          const merged = mergeState(localNow, parsed);
-          if (sameOrderSet(merged.orders, localNow.orders || [])) return; // our own echo, or nothing new
+     listener. Idempotent (one shared promise) and AWAITABLE — sync() must
+     await it before snapshotting state, so the initial cloud merge lands
+     in dataRef before the sync loop starts saving; otherwise the loop
+     would push a pre-merge snapshot over both local state and the cloud
+     blob, wiping edits that so far existed only in the cloud copy. */
+  const connectCloud = useCallback((token) => {
+    if (!cloudConfigured() || !token) return Promise.resolve();
+    if (cloudConnectRef.current) return cloudConnectRef.current;
+    const connecting = (async () => {
+      setCloudState("connecting");
+      try {
+        await cloudSignIn(token);
+        const remote = await cloudGet();
+        const local = dataRef.current || {};
+        if (remote?.json) {
+          // Per-order merge (see lib/syncMerge.js), NOT "newest blob wins" —
+          // a stale device's save could otherwise clobber a fresher edit
+          // made on another device to a completely different order (e.g. a
+          // "Try real prices" fix vanishing after refresh because some
+          // unrelated save on another device raced it with a newer top-
+          // level timestamp). Each order carries its own updatedAt, so the
+          // merge keeps whichever copy of EACH order is actually newer and
+          // takes the union of both order lists — nothing is lost.
+          const parsed = JSON.parse(remote.json);
+          const merged = mergeState(local, parsed);
+          dataRef.current = merged; // before setData: await-ers read the merged state immediately
           setData(merged);
           storage.set(STORAGE_KEY, JSON.stringify(merged)).catch(() => {});
           if (remoteIsStale(merged.orders, parsed.orders)) {
-            cloudSet(JSON.stringify(merged), merged.updatedAt).catch(() => {});
+            // Remote was missing something local had, or had an older copy
+            // of some order — push the merged truth back so both sides
+            // converge instead of staying split.
+            await cloudSet(JSON.stringify(merged), merged.updatedAt).catch(() => {});
           }
-          pushLog("Cloud: merged updates from another device.", "ok");
-        } catch { /* malformed remote payload — ignore */ }
-      });
-      // Live carrier ETAs (written by the scheduled GitHub Action) — read-only.
-      try {
-        cloudCarrierUnsubRef.current = await cloudSubscribeCarrier(setCarrier);
-      } catch { /* carrier data optional */ }
-      cloudReadyRef.current = true;
-      setCloudState("on");
-    } catch (e) {
-      cloudConnectingRef.current = false; // allow retry on next token
-      setCloudState("error");
-      pushLog("Cloud sync failed: " + e.message + " — data stays local. Check the Firebase setup in README.", "warn");
-    }
-  }, []);
+          pushLog(`Cloud: merged with Firebase (${merged.orders.length} order(s) total).`, "ok");
+        } else if (local.orders?.length || local.updatedAt) {
+          await cloudSet(JSON.stringify(local), local.updatedAt || Date.now());
+          pushLog("Cloud: uploaded local data to Firebase.", "ok");
+        }
+        cloudUnsubRef.current = await cloudSubscribe((val) => {
+          if (!val?.json) return;
+          if (syncingRef.current) {
+            // A sync is writing from its own snapshot — hold the payload
+            // and replay it when the sync ends (pendingRemoteRef effect
+            // below) instead of merging mid-sync, which would race the
+            // sync loop's own saves.
+            pendingRemoteRef.current = val;
+            pushLog("Cloud: remote change arrived mid-sync — holding it to merge after the sync.", "warn");
+            return;
+          }
+          applyRemote(val, "Cloud: merged updates from another device.");
+        });
+        // Live carrier ETAs (written by the scheduled GitHub Action) — read-only.
+        try {
+          cloudCarrierUnsubRef.current = await cloudSubscribeCarrier(setCarrier);
+        } catch { /* carrier data optional */ }
+        // Clock sanity check: the per-order merge trusts each device's own
+        // Date.now() stamps, so a skewed clock silently out-ranks newer
+        // edits from correctly-clocked devices. Detect and warn.
+        try {
+          const skew = await cloudClockSkew();
+          if (Math.abs(skew) > 2 * 60e3) {
+            pushLog(`⚠ This device's clock is ~${Math.round(Math.abs(skew) / 60e3)} min ${skew > 0 ? "ahead of" : "behind"} real time — cross-device edits may merge in the wrong order. Fix this device's system clock.`, "warn");
+          }
+        } catch { /* best-effort */ }
+        cloudReadyRef.current = true;
+        setCloudState("on");
+      } catch (e) {
+        cloudConnectRef.current = null; // allow retry on next token
+        setCloudState("error");
+        pushLog("Cloud sync failed: " + e.message + " — data stays local. Check the Firebase setup in README.", "warn");
+      }
+    })();
+    cloudConnectRef.current = connecting;
+    return connecting;
+  }, [applyRemote]);
+
+  /* Replay the remote update (if any) that arrived while a sync was
+     running — the live listener parks it in pendingRemoteRef rather than
+     merging mid-sync. */
+  useEffect(() => {
+    if (syncing || !pendingRemoteRef.current) return;
+    const val = pendingRemoteRef.current;
+    pendingRemoteRef.current = null;
+    applyRemote(val, "Cloud: merged the update that arrived mid-sync.");
+  }, [syncing, applyRemote]);
 
   /* If already signed in from a previous session, connect cloud on open. */
   useEffect(() => {
@@ -190,12 +236,13 @@ export default function App() {
      once promoted, the filter matches nothing. */
   useEffect(() => {
     if (!loaded || syncing) return;
-    const done = data.orders.filter(
+    const cur = dataRef.current || data;
+    const done = cur.orders.filter(
       (o) => (o.status || "ordered") === "shipped" && o.tracking?.number && carrier[o.tracking.number]?.status === "Delivered"
     );
     if (!done.length) return;
     const ids = new Set(done.map((o) => o.id));
-    save({ ...data, orders: data.orders.map((o) => (ids.has(o.id) ? { ...o, status: "delivered", updatedAt: Date.now() } : o)) });
+    save({ ...cur, orders: cur.orders.map((o) => (ids.has(o.id) ? { ...o, status: "delivered", updatedAt: Date.now() } : o)) });
     pushLog(`Carrier reported delivered — updated ${done.length} order(s): ${done.map((o) => o.id).join(", ")}`, "ok");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [carrier, loaded, syncing, data.orders]);
@@ -225,7 +272,7 @@ export default function App() {
     if (cloudCarrierUnsubRef.current) { try { cloudCarrierUnsubRef.current(); } catch { /* noop */ } cloudCarrierUnsubRef.current = null; }
     setCarrier({});
     cloudReadyRef.current = false;
-    cloudConnectingRef.current = false;
+    cloudConnectRef.current = null;
     cloudSignOut();
     if (cloudConfigured()) setCloudState("off");
     pushLog("Signed out of Google.");
@@ -315,7 +362,8 @@ export default function App() {
       manualEdit: true,
       updatedAt: Date.now(), // per-order timestamp for cloud merge (lib/syncMerge.js)
     };
-    save({ ...data, orders: data.orders.map((o) => (o.id === cleaned.id ? cleaned : o)) });
+    const cur = dataRef.current || data; // dataRef, not the render closure — see save()
+    save({ ...cur, orders: cur.orders.map((o) => (o.id === cleaned.id ? cleaned : o)) });
     pushLog(`Saved manual edits to ${cleaned.id}.`, "ok");
     setEditingId(null);
     setEditDraft(null);
@@ -324,7 +372,8 @@ export default function App() {
   /* ----- quick single-item edit (mobile detail sheet) ----- */
   const updateItem = useCallback((orderId, itemIdx, patch) => {
     if (syncing) { pushLog("Can't save edits while a sync is running.", "warn"); return; }
-    const orders = data.orders.map((o) => {
+    const cur = dataRef.current || data; // dataRef, not the render closure — see save()
+    const orders = cur.orders.map((o) => {
       if (o.id !== orderId) return o;
       const items = (o.items || []).map((it, i) => {
         if (i !== itemIdx) return it;
@@ -343,13 +392,14 @@ export default function App() {
       });
       return { ...o, items, manualEdit: true, updatedAt: Date.now() }; // per-order timestamp for cloud merge
     });
-    save({ ...data, orders });
+    save({ ...cur, orders });
     pushLog(`Saved item edit in ${orderId}.`, "ok");
   }, [data, save, syncing]);
 
   const deleteOrder = useCallback((id) => {
     if (syncing) return;
-    save({ ...data, orders: data.orders.filter((x) => x.id !== id) });
+    const cur = dataRef.current || data; // dataRef, not the render closure — see save()
+    save({ ...cur, orders: cur.orders.filter((x) => x.id !== id) });
   }, [data, save, syncing]);
 
   /* ----- open this order's detail page on temu.com in a new tab -----
@@ -373,7 +423,8 @@ export default function App() {
         const html = extractHtml(fullMsg.payload);
         const link = extractOrderLink(html, order.id);
         if (link) {
-          save({ ...data, orders: data.orders.map((o) => (o.id === order.id ? { ...o, orderUrl: link } : o)) });
+          const cur = dataRef.current || data; // dataRef, not the render closure — see save()
+          save({ ...cur, orders: cur.orders.map((o) => (o.id === order.id ? { ...o, orderUrl: link } : o)) });
           nav(link);
           return;
         }
@@ -603,7 +654,8 @@ export default function App() {
     try {
       const token = await getToken({ interactive: true });
       setGoogleSignedIn(true);
-      const working = { ...data, orders: [...data.orders], processedIds: [...data.processedIds] };
+      const base = dataRef.current || data; // dataRef, not the render closure — see save()
+      const working = { ...base, orders: [...base.orders], processedIds: [...base.processedIds] };
       pushLog(`Re-reading ${order.id} from its email…`);
       const em = {
         id: order.messageId,
@@ -652,7 +704,8 @@ export default function App() {
         pushLog(`No order-confirmation email containing ${po} was found (checked ${msgs.length} matches). Open Gmail and search "${po}" to see what exists.`, "warn");
         return;
       }
-      const working = { ...data, orders: [...data.orders], processedIds: [...data.processedIds] };
+      const base = dataRef.current || data; // dataRef, not the render closure — see save()
+      const working = { ...base, orders: [...base.orders], processedIds: [...base.processedIds] };
       await processOrderEmail(found, token, working, { forceId: po });
       if (working.orders.some((o) => o.id === po)) {
         await save({ ...working });
@@ -752,7 +805,8 @@ export default function App() {
         manualEdit: true,
         updatedAt: Date.now(), // per-order timestamp for cloud merge (lib/syncMerge.js)
       });
-      await save({ ...data, orders: data.orders.map((o) => (o.id === orderId ? fixed : o)) });
+      const cur = dataRef.current || data; // dataRef, not the render closure — see save()
+      await save({ ...cur, orders: cur.orders.map((o) => (o.id === orderId ? fixed : o)) });
       pushLog(`✓ ${orderId}: replaced estimated prices with real ones from its status email.`, "ok");
     } catch (e) {
       pushLog("Price fix failed: " + e.message, "error");
@@ -774,7 +828,8 @@ export default function App() {
     try {
       const token = await getToken({ interactive: true });
       setGoogleSignedIn(true);
-      const working = { ...data, orders: [...data.orders], processedIds: [...data.processedIds] };
+      const base = dataRef.current || data; // dataRef, not the render closure — see save()
+      const working = { ...base, orders: [...base.orders], processedIds: [...base.processedIds] };
       // Oldest-first, same reasoning as the main sync loop below.
       const toRetry = [...failedEmails].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
       for (let i = 0; i < toRetry.length; i++) {
@@ -804,13 +859,21 @@ export default function App() {
     setSyncing(true);
     cancelRequestedRef.current = false;
     setLog([]);
-    const working = full
-      ? { ...data, orders: [], processedIds: [] }
-      : { ...data, orders: [...data.orders], processedIds: [...data.processedIds] };
     try {
       const token = await getToken({ interactive });
       setGoogleSignedIn(true);
-      connectCloud(token);
+      // AWAIT the cloud connect BEFORE snapshotting `working`: the first
+      // connect of a session merges the cloud copy into dataRef, and
+      // building the snapshot from the pre-merge state made every save()
+      // below push that stale snapshot over both local state and the cloud
+      // blob — wiping edits that so far existed only in the cloud copy
+      // (e.g. a "Try real prices" fix made on another device). Hits on
+      // every first sync after a page load, i.e. normal daily use.
+      await connectCloud(token);
+      const base = dataRef.current || data;
+      const working = full
+        ? { ...base, orders: [], processedIds: [] }
+        : { ...base, orders: [...(base.orders || [])], processedIds: [...(base.processedIds || [])] };
 
       /* 1 — find Temu emails. Normal incremental syncs only search since the
          last successful sync (fast). A full re-sync, first-ever sync, or an
@@ -880,10 +943,10 @@ export default function App() {
          is deleted, so relying on it alone would skip a deleted order forever
          even on a fresh sync. */
       const hasOrder = (id) => working.orders.some((o) => o.messageId === id);
-      const isEmptyOrder = (id) => {
-        const o = working.orders.find((x) => x.messageId === id);
-        return o && (!o.items || o.items.length === 0);
-      };
+      // Split emails share one messageId across SEVERAL orders — check every
+      // sibling, not just the first match, or a partially-empty split order
+      // never self-heals on a normal sync (only via explicit Reconcile).
+      const isEmptyOrder = (id) => working.orders.some((o) => o.messageId === id && (!o.items || o.items.length === 0));
       const searchOrderIds = new Set(emails.filter((e) => e.kind === "order").map((e) => e.id));
       const retries = working.orders
         .filter((o) => (!o.items || o.items.length === 0) && o.messageId && !searchOrderIds.has(o.messageId))

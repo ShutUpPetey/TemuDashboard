@@ -242,7 +242,7 @@ export default function DesktopShell({ c }) {
 function Overview({ c, delta, reviewCount, goView, goOrder }) {
   const s = c.stats;
   const recent = [...c.data.orders].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 5);
-  if (c.data.orders.length === 0) return <Empty syncing={c.syncing} />;
+  if (c.data.orders.length === 0) return <Empty syncing={c.syncing} loaded={c.loaded} />;
   return (
     <div className="space-y-4">
       {/* KPI cards */}
@@ -387,7 +387,7 @@ function PanelHead({ title, action }) {
 const ORDER_SORTS = [["date", "Date"], ["total", "Total"], ["status", "Status"], ["id", "PO"]];
 
 function OrdersView({ c, orders, expanded, setExpanded, goOrder, openItem, orderStatusFilter, setOrderStatusFilter, orderSort, setOrderSort, hasQuery }) {
-  if (c.data.orders.length === 0) return <Empty syncing={c.syncing} />;
+  if (c.data.orders.length === 0) return <Empty syncing={c.syncing} loaded={c.loaded} />;
   return (
     <div className="space-y-3">
       <div className="bg-white border border-stone-200 rounded-lg p-3 flex flex-wrap gap-2 items-center">
@@ -613,15 +613,21 @@ function EditForm({ c }) {
           ))}
         </tbody>
       </table>
-      <div className="flex gap-2">
-        <button onClick={c.saveEdit}
-          className="inline-flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3 py-1.5 rounded-sm transition-colors">
+      <button
+        onClick={() => setD((x) => ({ ...x, items: [...(x.items || []), { name: "", category: "Other", qty: 1, listed: null, paid: null }] }))}
+        className="text-xs font-bold text-blue-600 hover:text-blue-500">
+        + Add item
+      </button>
+      <div className="flex gap-2 items-center">
+        <button onClick={c.saveEdit} disabled={c.syncing}
+          className="inline-flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3 py-1.5 rounded-sm transition-colors disabled:opacity-50">
           <Save size={13} /> Save
         </button>
         <button onClick={c.cancelEdit}
           className="text-stone-500 hover:text-stone-800 text-xs font-bold px-3 py-1.5 border border-stone-300 rounded-sm transition-colors">
           Cancel
         </button>
+        {c.syncing && <span className="text-[11px] text-amber-600">Editing is locked while a sync runs.</span>}
       </div>
     </div>
   );

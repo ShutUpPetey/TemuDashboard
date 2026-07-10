@@ -326,6 +326,29 @@ for (const [uid, node] of Object.entries(root.val() || {})) {
   try { orders = JSON.parse(stateJson).orders || []; } catch { continue; }
   const carrierNode = node.carrier || {};
 
+  // Daily off-device backup: snapshot the state blob to backups/{YYYY-MM-DD}
+  // (idempotent per day — this Action runs every 6h) and prune to the last 7
+  // days. Cheap insurance against app-side failure modes (a bad merge, an
+  // accidental Clear-all/Full-re-sync propagating through cloud sync) that
+  // the manual JSON export only covers when the user remembers to run it.
+  // Restore = copy a backup's json back over manifest/{uid}/state.json in
+  // the Firebase console, then refresh the app.
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const existingBk = node.backups || {};
+    if (!existingBk[today]) {
+      const backupsRef = db.ref(`manifest/${uid}/backups`);
+      await backupsRef.child(today).set({ json: stateJson, savedAt: Date.now() });
+      const stale = Object.keys(existingBk).sort();
+      for (const d of stale.slice(0, Math.max(0, stale.length - 6))) {
+        await backupsRef.child(d).remove();
+      }
+      console.log(`${uid}: state backed up to backups/${today} (${Math.round(stateJson.length / 1024)} KB).`);
+    }
+  } catch (e) {
+    console.warn(`${uid}: backup failed — ${e.message}`);
+  }
+
   // Shipped orders with tracking numbers, newest first, minus delivered.
   const shipped = orders
     .filter((o) => (o.status || "ordered") === "shipped" && o.tracking?.number)
@@ -348,13 +371,20 @@ for (const [uid, node] of Object.entries(root.val() || {})) {
 
   for (const { number, carrier } of jobs) {
     try {
-      // Adapter fall-through: first one that produces a record wins.
+      // Adapter fall-through: first one that produces a record wins. Each
+      // attempt is isolated — an adapter that THROWS (network error, 429)
+      // must not kill the chain for this number, only return-null does the
+      // documented fall-through otherwise.
+      const attempt = async (name, fn) => {
+        try { return await fn(); }
+        catch (e) { console.warn(`  ${number}: ${name} errored (${e.message}) — trying next adapter`); return null; }
+      };
       let rec = null;
-      if (SHIPPO_KEY) rec = await trackShippo(number, carrier);
-      if (!rec && EASYPOST_KEY) rec = await trackEasypost(number, carrier, carrierNode[number] || {});
-      if (!rec && carrier === "UPS" && UPS_ID && UPS_SECRET) rec = await trackUps(number);
-      if (!rec && carrier === "USPS" && USPS_ID && USPS_SECRET) rec = await trackUsps(number);
-      if (!rec && SHIP24_KEY) rec = await trackShip24(number, carrierNode[number] || {}, ship24Budget);
+      if (SHIPPO_KEY) rec = await attempt("Shippo", () => trackShippo(number, carrier));
+      if (!rec && EASYPOST_KEY) rec = await attempt("EasyPost", () => trackEasypost(number, carrier, carrierNode[number] || {}));
+      if (!rec && carrier === "UPS" && UPS_ID && UPS_SECRET) rec = await attempt("UPS", () => trackUps(number));
+      if (!rec && carrier === "USPS" && USPS_ID && USPS_SECRET) rec = await attempt("USPS", () => trackUsps(number));
+      if (!rec && SHIP24_KEY) rec = await attempt("Ship24", () => trackShip24(number, carrierNode[number] || {}, ship24Budget));
       if (!rec) { console.log(`  ${number}: no adapter result (${carrier || "unknown carrier"}) — skipped`); continue; }
       await db.ref(`manifest/${uid}/carrier/${number}`).update({ registered: true, ...rec, checkedAt: Date.now() });
       console.log(`  ${number} (${rec.provider}): ${rec.status} eta=${rec.etaFrom || "?"}`);

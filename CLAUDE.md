@@ -25,6 +25,18 @@ multi-field search + filter/sort across Items and Orders in both shells,
 two-tier review split between genuinely-estimated split-order prices and
 single-item orders whose paid amount is exact but list price is unknown.
 
+**2026-07-10 multi-agent review:** `IMPROVEMENTS.md` (repo root) is the ranked
+issue/improvement tracker produced by parallel UI/UX, architecture, and
+data/sync reviews. 18 fixes landed the same night (see its status notes) —
+headliners: sync() now awaits the cloud merge before snapshotting (was
+clobbering cloud data on the first sync of every session), mid-sync remote
+updates are parked and replayed instead of dropped, all mutation sites read a
+synchronously-updated `dataRef` instead of stale render closures, null-total
+split orders get flagged `estimated` instead of silently pricing at $0.00,
+Full re-sync/Import now confirm, sheets close on Escape, and the carrier
+Action snapshots a daily state backup. Check IMPROVEMENTS.md before starting
+new work — it has the remaining P1/P2 backlog and the "bigger ideas" list.
+
 Open threads:
 
 1. **Unrecognized split-email formats.** Some multi-order confirmation emails
@@ -46,6 +58,11 @@ Open threads:
    in practice since deletion is a manual, deliberate action — not fixed
    because it'd require a tombstone system that conflicts with the existing
    "delete to force a clean Reconcile re-read" mechanism (see `hasOrder()`).
+   NOTE (2026-07 review): the architecture review found this is more common
+   than documented (any device offline at deletion time resurrects on
+   reconnect) AND that a tombstone map is compatible with Reconcile-recreate
+   after all (a re-read order gets a fresh `updatedAt` newer than the
+   tombstone) — see IMPROVEMENTS.md IMP-008 for the design if/when fixing.
 
 ## Architecture
 
@@ -92,6 +109,12 @@ means `paid` is exact but the pre-discount `listed` price was never shown
 two flags are mutually exclusive. Store: `{ orders, processedIds, lastSync,
 autoSync, updatedAt }` under IndexedDB key `temu-manifest-v1`, mirrored to
 Firebase `manifest/{uid}/state` as `{json, updatedAt}`.
+
+Cloud backups (written ONLY by the GitHub Action): `manifest/{uid}/backups/
+{YYYY-MM-DD}` = `{json, savedAt}` — one snapshot of the state blob per day,
+7-day retention, taken by `carrier-eta.mjs` each run. Restore = copy a
+backup's `json` over `manifest/{uid}/state/json` in the Firebase console,
+then refresh the app.
 
 Carrier records (written ONLY by the GitHub Action, app just subscribes):
 `manifest/{uid}/carrier/{trackingNumber}` = `{ registered, provider, status
@@ -172,6 +195,18 @@ eventTime, eventDesc, checkedAt, trackerId?/easypostId? }`.
   fingerprint check the live listener uses to recognize its own echo (avoids
   a save→notify→merge→save loop). `processedIds` merges as a plain union
   (never lossy). Known gap: no tombstones for deletions — see Open threads.
+  Hardened 2026-07-10: `connectCloud` is one shared awaitable promise;
+  `sync()`/`rereadOrder`/`importMissingOrder`/`retryFailedEmails` build
+  their `working` snapshot from `dataRef.current` AFTER awaiting it (the
+  old pre-merge snapshot used to overwrite the cloud on the first sync of
+  a session). `dataRef.current` is written SYNCHRONOUSLY at every mutation
+  (save/applyRemote/connectCloud) and every mutation handler reads it —
+  never the `data` render closure — so same-tick mutations can't drop each
+  other. Remote payloads arriving mid-sync are parked in `pendingRemoteRef`
+  and replayed through `applyRemote()` when syncing ends. On connect the
+  app also measures device clock skew against Firebase server time
+  (`cloudClockSkew`) and warns in the log above 2 minutes, since the merge
+  trusts client `Date.now()` stamps.
 - **Two-tier price review (`estimated` vs `listedUnknown`)**: `applyDiscounts`'
   no-listed-price fallback (split-order confirmations with only a combined
   total) used to flag every resulting item `estimated`. Now it only does that
@@ -184,7 +219,11 @@ eventTime, eventDesc, checkedAt, trackerId?/easypostId? }`.
   only the former counts toward the urgent Review badge. Both shells' Review
   view and ItemSheet show a distinct 🏷 treatment for `listedUnknown` (vs the
   amber "≈" for `estimated`), and both can trigger `fixEstimatedPrices` to try
-  recovering the real numbers from a later status email.
+  recovering the real numbers from a later status email. Since 2026-07-10
+  `applyDiscounts` also has a `base <= 0` catch-all: when there are no listed
+  prices AND no usable total (e.g. a split email whose per-sub-order total
+  failed to extract), items get `paid: null` + `estimated: true` instead of
+  the old silent, unflagged $0.00.
 - **Unified search + filter/sort (`lib/derive.js`: `matchesQuery`,
   `itemSearchIndex`, `orderSearchIndex`)**: the single search box (shared
   state, `c.query`) now matches across BOTH Items and Orders views in both

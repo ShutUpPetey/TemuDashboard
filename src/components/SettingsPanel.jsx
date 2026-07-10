@@ -26,12 +26,24 @@ export default function SettingsPanel({ c, dark = true }) {
           className={link(dark ? "text-blue-400 hover:text-blue-300" : "text-blue-600 hover:text-blue-500")}>
           Reconcile with Gmail
         </button>
-        <button onClick={() => c.sync(true)} disabled={c.syncing}
+        <button
+          onClick={() => {
+            if (confirm(
+              "Full re-sync WIPES all stored orders — including manual edits and recovered prices — and re-reads everything from Gmail (many vision calls, several minutes).\n\n" +
+              "If something just looks out of date, cancel and use Reconcile instead: it only adds what's missing and never overwrites your edits.\n\nContinue with the destructive full re-sync?"
+            )) c.sync(true);
+          }}
+          disabled={c.syncing}
+          title="Destructive: clears every stored order (manual edits included) and re-reads your whole Gmail history from scratch. Reconcile is the safe option."
           className={link(dark ? "text-orange-400 hover:text-orange-300" : "text-orange-600 hover:text-orange-500")}>
           Full re-sync
         </button>
         <button
-          onClick={async () => { if (confirm("Clear all stored orders?")) await c.save({ orders: [], processedIds: [], lastSync: null, autoSync: c.data.autoSync }); }}
+          onClick={async () => {
+            if (confirm(
+              "Clear ALL stored orders?\n\nWith cloud sync on, the empty state also pushes to Firebase — your other devices will sync to empty too. Consider Export JSON first."
+            )) await c.save({ orders: [], processedIds: [], lastSync: null, autoSync: c.data.autoSync });
+          }}
           className={link(dark ? "text-red-400 hover:text-red-300" : "text-red-600 hover:text-red-500")}>
           Clear all data
         </button>
@@ -102,7 +114,11 @@ export default function SettingsPanel({ c, dark = true }) {
         <button onClick={c.exportData} className={btn}><Download size={12} /> Export JSON</button>
         <button onClick={() => importInputRef.current?.click()} className={btn}><Upload size={12} /> Import JSON</button>
         <input ref={importInputRef} type="file" accept="application/json" className="hidden"
-          onChange={(e) => { const f = e.target.files?.[0]; if (f) c.importData(f); e.target.value = ""; }} />
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f && confirm("Importing REPLACES all current data with this backup file (and pushes it to the cloud if sync is on). Continue?")) c.importData(f);
+            e.target.value = "";
+          }} />
         <span className={dark ? "text-stone-600" : "text-stone-300"}>·</span>
         <button onClick={c.exportItemsCsv} className={btn}><Download size={12} /> Items CSV</button>
         <button onClick={c.exportOrdersCsv} className={btn}><Download size={12} /> Orders CSV</button>

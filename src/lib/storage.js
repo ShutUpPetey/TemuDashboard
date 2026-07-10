@@ -85,8 +85,12 @@ export const storage = {
     } catch {
       // IndexedDB unavailable (e.g. some private-browsing modes) —
       // fall back to localStorage so the app still works.
-      const v = localStorage.getItem(key);
-      return v != null ? { value: v } : null;
+      try {
+        const v = localStorage.getItem(key);
+        return v != null ? { value: v } : null;
+      } catch {
+        return null; // both backends unavailable — behave like a first run
+      }
     }
   },
   async set(key, value) {
@@ -94,7 +98,14 @@ export const storage = {
     try {
       await idbSet(key, value);
     } catch {
-      localStorage.setItem(key, value); // fallback, see get()
+      try {
+        localStorage.setItem(key, value); // fallback, see get()
+      } catch {
+        // Both backends failed (quota, private mode). Surface it — save()
+        // logs this message, so the user learns the edit won't survive a
+        // reload instead of finding out by losing it.
+        throw new Error("could not persist locally (IndexedDB and localStorage both failed — likely storage quota); this change will NOT survive a reload unless cloud sync is on");
+      }
     }
     return { key };
   },

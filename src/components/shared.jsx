@@ -110,7 +110,18 @@ export function Elapsed({ className }) {
   return <span className={className}>{s}s</span>;
 }
 
-export function Empty({ syncing }) {
+export function Empty({ syncing, loaded = true }) {
+  // Until IndexedDB has answered, this ISN'T an empty store — it's still
+  // loading. Showing "No orders yet" for that first beat reads like data
+  // loss on every open of a populated app.
+  if (!loaded) {
+    return (
+      <div className="text-center py-16 text-stone-400 border-2 border-dashed border-stone-200 rounded-sm">
+        <Package size={36} className="mx-auto mb-3 text-stone-300 animate-pulse" />
+        <div className="disp font-bold text-stone-500">Loading your orders…</div>
+      </div>
+    );
+  }
   return (
     <div className="text-center py-16 text-stone-400 border-2 border-dashed border-stone-200 rounded-sm">
       <Package size={36} className={`mx-auto mb-3 ${syncing ? "text-orange-400 animate-pulse" : "text-stone-300"}`} />

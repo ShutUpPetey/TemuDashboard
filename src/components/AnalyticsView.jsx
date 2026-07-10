@@ -7,7 +7,7 @@ import { fmt, StatusChip, Empty } from "./shared";
    category rows navigate to a filtered Items view. */
 export default function AnalyticsView({ c, onCategoryClick, onStatusClick }) {
   const { stats, activeItems } = c;
-  if (activeItems.length === 0) return <Empty syncing={c.syncing} />;
+  if (activeItems.length === 0) return <Empty syncing={c.syncing} loaded={c.loaded} />;
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap gap-2">

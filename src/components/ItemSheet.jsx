@@ -1,7 +1,7 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Pencil, Save, ExternalLink, RotateCcw, ReceiptText } from "lucide-react";
 import { CATEGORIES, fmt, StatusChip, CropThumb, carrierInfoFor, carrierEtaText } from "./shared";
-import { siblingOrders } from "../lib/derive";
+import { siblingOrders, annotateThumbs } from "../lib/derive";
 
 /* ============================================================
    Item detail sheet — the connective hub of the app, shared by
@@ -17,12 +17,25 @@ import { siblingOrders } from "../lib/derive";
    ============================================================ */
 
 export default function ItemSheet({ c, it, onClose, onViewOrder, desktop = false }) {
+  const order = c.data.orders.find((o) => o.id === it.orderId);
+  // Re-derive the item from live state: `it` is a snapshot from whenever the
+  // sheet was opened, so an in-place data change (most visibly the "try real
+  // prices" action below, which rewrites this very item) would otherwise
+  // keep showing stale numbers in the open sheet.
+  const liveIt = order ? annotateThumbs(order.items || [])[it.itemIdx] : null;
+  if (liveIt) it = { ...it, ...liveIt, status: order.status || it.status };
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState({
     name: it.name || "", category: it.category || "Other",
     qty: it.qty || 1, listed: it.listed ?? "", paid: it.paid ?? "",
   });
-  const order = c.data.orders.find((o) => o.id === it.orderId);
+  /* Esc closes the sheet — matching Lightbox — unless a lightbox is
+     stacked on top (its own Esc handler should win). */
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape" && !c.lightbox) onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, c.lightbox]);
   const sibs = order ? siblingOrders(c.data.orders, order) : [];
   const status = it.status || "ordered";
   const cancelled = status === "cancelled" || status === "returned";
@@ -40,6 +53,7 @@ export default function ItemSheet({ c, it, onClose, onViewOrder, desktop = false
   return (
     <div className={`fixed inset-0 z-40 flex ${desktop ? "items-center" : "items-end"} justify-center bg-black/40 p-0 sm:p-4`} onClick={onClose}>
       <div
+        role="dialog" aria-modal="true" aria-label={it.name || "Item details"}
         className={`bg-white w-full max-w-md max-h-[88vh] overflow-y-auto ${desktop ? "rounded-2xl shadow-2xl" : "rounded-t-3xl"}`}
         onClick={(e) => e.stopPropagation()}>
         {!desktop && <div className="w-10 h-1 rounded-full bg-stone-300 mx-auto mt-2.5 mb-1" />}

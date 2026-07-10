@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 import { ExternalLink, Pencil, RotateCcw, ReceiptText } from "lucide-react";
 import { fmt, pct, StatusChip, CropThumb, annotateThumbs, isActiveStatus, carrierInfoFor, carrierEtaText, CARRIER_STATUS_LABEL } from "./shared";
 import { siblingOrders } from "../lib/derive";
@@ -21,6 +21,13 @@ import { siblingOrders } from "../lib/derive";
 
 export default function OrderSheet({ c, orderId, onClose, onOpenItem, onOpenOrder, onShowInList, onEdit, desktop = false }) {
   const order = c.data.orders.find((o) => o.id === orderId);
+  /* Esc closes the sheet — matching Lightbox — unless a lightbox is
+     stacked on top (its own Esc handler should win). */
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape" && !c.lightbox) onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, c.lightbox]);
   if (!order) return null;
   const sibs = siblingOrders(c.data.orders, order);
   const family = [order, ...sibs];
@@ -32,6 +39,7 @@ export default function OrderSheet({ c, orderId, onClose, onOpenItem, onOpenOrde
   return (
     <div className={`fixed inset-0 z-40 flex ${desktop ? "items-center" : "items-end"} justify-center bg-black/40 p-0 sm:p-4`} onClick={onClose}>
       <div
+        role="dialog" aria-modal="true" aria-label={`Order ${order.id}`}
         className={`bg-white w-full max-w-md max-h-[88vh] overflow-y-auto ${desktop ? "rounded-2xl shadow-2xl" : "rounded-t-3xl"}`}
         onClick={(e) => e.stopPropagation()}>
         {!desktop && <div className="w-10 h-1 rounded-full bg-stone-300 mx-auto mt-2.5 mb-1" />}

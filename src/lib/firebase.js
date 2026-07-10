@@ -16,9 +16,11 @@
      the OAuth client ID to be safelisted in Firebase Auth (README).
    - SDK is loaded on demand from Google's CDN (dynamic import), so
      there's no npm dependency and zero cost when unconfigured.
-   - Data lives at manifest/{uid}/state as { json, updatedAt } —
-     whole-state blob, newest-wins. Simple and safe for one user.
-     IndexedDB remains the local cache/offline fallback.
+   - Data lives at manifest/{uid}/state as { json, updatedAt }. The blob
+     is stored whole, but conflict resolution is NOT newest-blob-wins:
+     App.jsx merges local and remote PER ORDER via lib/syncMerge.js
+     (each order carries its own updatedAt). IndexedDB remains the
+     local cache/offline fallback.
 
    Suggested security rules (Firebase console → Realtime Database → Rules):
      {
@@ -88,6 +90,18 @@ async function stateRef() {
   const { app, dbMod } = await fb();
   if (!uid) throw new Error("Cloud sync isn't signed in yet");
   return { dbMod, ref: dbMod.ref(dbMod.getDatabase(app), `manifest/${uid}/state`) };
+}
+
+/* How far this device's clock is from Firebase's server clock, in ms
+   (positive = local clock runs ahead). The per-order sync merge trusts
+   each device's own Date.now() stamps, so a badly skewed clock lets a
+   device's edits permanently out-rank genuinely newer ones from a
+   correctly-clocked device — this can't be fixed silently, but it CAN
+   be detected and warned about (see connectCloud in App.jsx). */
+export async function cloudClockSkew() {
+  const { app, dbMod } = await fb();
+  const snap = await dbMod.get(dbMod.ref(dbMod.getDatabase(app), ".info/serverTimeOffset"));
+  return -(snap.val() || 0); // serverTime ≈ Date.now() + offset
 }
 
 /* Returns { json, updatedAt } or null. */
