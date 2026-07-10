@@ -6,24 +6,32 @@ Keep it updated when architecture or integrations change.
 
 ## What this is
 
-A personal, single-user dashboard (owner: Matt, github.com/ShutUpPetey) that reads
+A personal dashboard (owner/admin: Matt, github.com/ShutUpPetey) that reads
 Temu order emails from Gmail, parses the image-rendered receipts with Claude
 vision, tracks items/prices/statuses with live carrier ETAs, and syncs across
 devices via Firebase. Static Vite/React app, deployed to GitHub Pages at
 `https://shutuppetey.github.io/TemuDashboard/` on every push to `main`.
+Started single-user; now optionally multi-user (see "Admin access" below) —
+each signed-in Google account gets fully private data, and Matt (only) can
+browse everyone's read-only via an Admin panel.
 
 ## Current state (July 2026)
 
 Working: Gmail sync + vision parsing, split-order emails, adaptive two-shell UI
 (desktop "command center" / mobile "visual gallery"), IndexedDB + Firebase RTDB
-cloud sync, order/item detail popups with full cross-linking, CSV/JSON export,
-carrier tracking via a scheduled GitHub Action (Shippo, $0.01/tracking number),
-auto-promotion of orders to "delivered" from carrier data, reconcile debugging
-tools (unmatched-status queue, find & import, downloadable log), unified
-multi-field search + filter/sort across Items and Orders in both shells,
-`fixEstimatedPrices` recovery of real prices from later status emails, and a
-two-tier review split between genuinely-estimated split-order prices and
-single-item orders whose paid amount is exact but list price is unknown.
+cloud sync with per-order merge, order/item detail popups with full
+cross-linking, CSV/JSON export, carrier tracking via a scheduled GitHub Action
+(Shippo, $0.01/tracking number), auto-promotion of orders to "delivered" from
+carrier data, reconcile debugging tools (unmatched-status queue, find &
+import, downloadable log), unified multi-field search + filter/sort across
+Items and Orders in both shells, `fixEstimatedPrices` recovery of real prices
+from later status emails, a two-tier review split between genuinely-estimated
+split-order prices and single-item orders whose paid amount is exact but list
+price is unknown, an "Arriving Soon" 14-day delivery calendar with
+past-guarantee/stale-tracking flags, a much-expanded Analytics tab (KPIs,
+spend trend, carrier performance, funnel, price histogram), a first-run
+Welcome tour, and optional multi-user admin oversight (directory + read-only
+"view as user").
 
 Open threads:
 
@@ -34,11 +42,16 @@ Open threads:
    but no readable sub-order IDs). NEXT STEP: user provides a raw snippet of
    such an email ("Show original" in Gmail, the "Order ID: PO-…" area) → fix the
    regex in `src/lib/gmail.js → extractSubOrders` → orders recover on Reconcile.
-2. Dormant adapters: EasyPost (user's dashboard never showed API keys), direct
+2. **Temu sends no structured "guaranteed by" date.** `arrivingCalendar()`
+   (Arriving Soon) falls back to the carrier's own ETA window, or parsed
+   email-ETA text, to decide what counts as "overdue" — checked `gmail.js`'s
+   extractors to confirm there's nothing better to prefer. If Temu's email
+   format ever adds an explicit guarantee date, prefer it ahead of both.
+3. Dormant adapters: EasyPost (user's dashboard never showed API keys), direct
    UPS (blocked: needs shipper account w/ scheduled pickups), direct USPS
    (blocked: registration issues), Ship24 (free quota burned), 17TRACK (needs
    business email). All still in `scripts/carrier-eta.mjs` as fall-throughs.
-3. **Cloud sync deletion resurrection (known, accepted limitation).** The
+4. **Cloud sync deletion resurrection (known, accepted limitation).** The
    per-order merge (see Key Mechanisms) has no tombstones. If you delete an
    order on one device before that deletion has synced to another device, and
    the other device saves anything before pulling the deletion, the merge (a
@@ -55,21 +68,26 @@ of two **shells** chosen by viewport (<768px = mobile) or the Settings → Layou
 override:
 
 - `src/components/DesktopShell.jsx` — sidebar nav; Overview (KPIs, arriving
-  soon, recent orders), Orders (inline expand + full edit form), Items table,
-  Analytics, Needs Review queue, Settings.
+  soon, recent orders), Arriving Soon (14-day calendar), Orders (inline expand
+  + full edit form), Items table, Analytics, Needs Review queue, Admin
+  (admin-only), Settings.
 - `src/components/MobileShell.jsx` — card grid, chip filters, floating stats
-  dock, bottom-sheet details.
+  dock, bottom-sheet details; Admin is reached via a Settings button rather
+  than the fixed 5-icon bottom dock.
 
 Shared: `components/ItemSheet.jsx` + `OrderSheet.jsx` (detail popups; they chain
 into each other and to sibling orders), `SettingsPanel.jsx`, `AnalyticsView.jsx`,
+`ArrivingSoonView.jsx` (14-day calendar), `WelcomeModal.jsx` (first-run tour),
+`AdminPanel.jsx` (admin-only directory + read-only "view as user"),
 `shared.jsx` (StatusChip, CropThumb, LogPanel, Lightbox, carrier helpers,
 constants), `lib/derive.js` (pure derivations: stats, review queue, siblings,
-annotateThumbs), `hooks/useMediaQuery.js`.
+annotateThumbs, arrivingCalendar), `hooks/useMediaQuery.js`.
 
 Libraries: `lib/gmail.js` (Gmail REST + all email extraction regexes),
 `lib/anthropic.js` (browser-direct Claude calls, model `claude-sonnet-5`),
 `lib/gis.js` (Google OAuth token client), `lib/firebase.js` (CDN-loaded RTDB
-sync, optional), `lib/storage.js` (IndexedDB with localStorage migration),
+sync, optional — also owns the `_directory` write and admin-only reads, see
+Key mechanisms), `lib/storage.js` (IndexedDB with localStorage migration),
 `lib/discounts.js` (proportional discount distribution — the core feature),
 `lib/syncMerge.js` (per-order cloud sync merge), `lib/exportCsv.js`.
 
@@ -98,6 +116,11 @@ Carrier records (written ONLY by the GitHub Action, app just subscribes):
 (InfoReceived|InTransit|OutForDelivery|AvailableForPickup|Delivered|
 DeliveryFailure|Exception|Expired|NotFound), subStatus, etaFrom, etaTo,
 eventTime, eventDesc, checkedAt, trackerId?/easypostId? }`.
+
+Directory record (written by EVERY signed-in user, read only by admin — see
+"Admin access" in External services): `manifest/_directory/{uid}` = `{ email,
+lastSeen }`, stamped by `lib/firebase.js → cloudSignIn` on every successful
+Firebase sign-in.
 
 ## Key mechanisms (don't rediscover these)
 
@@ -195,6 +218,35 @@ eventTime, eventDesc, checkedAt, trackerId?/easypostId? }`.
   has a status filter and a sort control (date/total/status/PO on desktop;
   date/total on mobile), matching the Items view's existing filter/sort
   pattern.
+- **Arriving Soon calendar (`arrivingCalendar()` in `lib/derive.js`)**: buckets
+  every non-delivered, non-cancelled/returned item onto a 14-day forward
+  calendar. "Expected date" prefers the live carrier ETA window (`etaTo`,
+  falling back to `etaFrom`) over the parsed email-ETA text (`etaEndDate` in
+  `gmail.js`), since Temu doesn't send a structured "guaranteed by" date
+  anywhere currently scraped (see Open threads). An item is **overdue** once
+  its expected date has passed without a `Delivered` carrier status — flagged
+  regardless of whether that date is still inside the visible 14-day window,
+  via a separate always-visible alert banner. **Stale** (a distinct, lower-
+  severity flag) means the carrier hasn't reported anything in 48h+ while
+  still `InTransit`/`OutForDelivery`/`AvailableForPickup`, and isn't already
+  overdue (overdue takes precedence, never double-badged). Items with
+  no carrier data AND no parseable email ETA go in a separate "no estimate
+  yet" bucket — but only once `shipped` (an `ordered` item simply hasn't
+  shipped yet, which isn't a gap worth flagging).
+- **Admin access (optional multi-user)**: default is still effectively
+  single-tenant-per-uid — Firebase rules already scope `manifest/{uid}` to
+  that uid, so separate signed-in accounts can't see each other regardless of
+  admin config. Setting `VITE_ADMIN_EMAIL` (see External services) adds an
+  **Admin** nav entry, visible only when the signed-in Firebase user's email
+  matches it (`App.jsx`'s `isAdmin`, a UI-only check — the real enforcement
+  is the Firebase rule on `auth.token.email`, see README). `AdminPanel.jsx`
+  lists everyone in `_directory` and, on "View data", does a ONE-TIME
+  `cloudGetUserState(uid)` read-only fetch (`lib/firebase.js`) into separate
+  React state (`adminViewUid`/`adminViewState`) — never merged into `data`,
+  never subscribed live, never written anywhere. There is no code path by
+  which viewing another user's data could write to their tree or the
+  admin's own; a bug here fails closed (Firebase rules reject it) rather
+  than open.
 - **Thumbnails (CropThumb)**: receipt PNG is one tall image; crop math uses
   measured natural size + rows-per-image; trusts Claude's `y` only when the
   image's y-values are monotonic and sanely spaced (`annotateThumbs`).
@@ -209,19 +261,32 @@ eventTime, eventDesc, checkedAt, trackerId?/easypostId? }`.
   `VITE_GOOGLE_CLIENT_ID`, scopes `gmail.readonly openid email profile`. Origins
   allowed: `http://localhost:5173`, `https://shutuppetey.github.io`. App is in
   "Testing" mode with Matt as test user (expect the unverified-app warning).
+  Letting other people use the app at all means adding their Google account
+  to this same Testing-mode **Test users** list (Google Cloud Console →
+  Audience tab, up to 100) — no code/repo change, purely a console click. Full
+  Production verification (to drop the allowlist entirely) is a bigger,
+  separate undertaking, not done.
 - **Anthropic API key**: entered in app Settings, lives only in browser
-  localStorage per device. Never in the repo.
-- **Firebase project `temu-dashboard-962d6`**: RTDB (rules: only `auth.uid`
-  matching `manifest/$uid`), Google auth provider enabled with the OAuth client
-  ID safelisted ("external project client IDs"). Web config values in `.env`
-  (`VITE_FIREBASE_*`) — public-safe.
+  localStorage per device, per person. Never in the repo. Already
+  multi-user-safe as-is — no change needed for other people to bring their
+  own key.
+- **Firebase project `temu-dashboard-962d6`**: RTDB (rules: `auth.uid`
+  matching `manifest/$uid`, plus an optional admin carve-out on both
+  `manifest/$uid` and `manifest/_directory` keyed on `auth.token.email` — see
+  README → "Admin access" for the exact rule JSON), Google auth provider
+  enabled with the OAuth client ID safelisted ("external project client
+  IDs"). Web config values in `.env` (`VITE_FIREBASE_*`) — public-safe.
+- **Admin email** (`VITE_ADMIN_EMAIL`, optional): Matt's email, gates the
+  Admin panel client-side; the Firebase rule on `auth.token.email` is the
+  actual security boundary, this is only a UI show/hide. Unset = admin panel
+  never renders for anyone (original single-user behavior).
 - **GitHub repo ShutUpPetey/TemuDashboard**. Repo **Variables** (public-safe,
   used by both workflows): `VITE_GOOGLE_CLIENT_ID`, `VITE_FIREBASE_API_KEY`,
   `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_DATABASE_URL`,
-  `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_APP_ID`. Repo **Secrets**:
-  `SHIPPO_KEY` (live token `shippo_live_…` — the test token errors with
-  "not a valid test tracking carrier"), `FIREBASE_SERVICE_ACCOUNT` (full JSON),
-  plus possibly leftover `SHIP24_KEY` etc. (harmless fallbacks).
+  `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_APP_ID`, `VITE_ADMIN_EMAIL`. Repo
+  **Secrets**: `SHIPPO_KEY` (live token `shippo_live_…` — the test token errors
+  with "not a valid test tracking carrier"), `FIREBASE_SERVICE_ACCOUNT` (full
+  JSON), plus possibly leftover `SHIP24_KEY` etc. (harmless fallbacks).
 - **Shippo**: free Starter plan + card; $0.01 per unique tracking number,
   polling free.
 - Pages: Settings → Pages → Source = GitHub Actions.

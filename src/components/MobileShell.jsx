@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import {
   RefreshCw, Search, Settings2, BarChart3, ReceiptText,
-  LayoutGrid, RotateCcw, AlertTriangle, ExternalLink, CalendarDays,
+  LayoutGrid, RotateCcw, AlertTriangle, ExternalLink, CalendarDays, ShieldCheck,
 } from "lucide-react";
 import {
   CATEGORIES, fmt, pct, isActiveStatus, StatusChip, CropThumb, annotateThumbs, Elapsed, Empty, LogPanel,
@@ -12,6 +12,7 @@ import { estimateCostPerCall } from "../lib/anthropic";
 import SettingsPanel from "./SettingsPanel";
 import AnalyticsView from "./AnalyticsView";
 import ArrivingSoonView from "./ArrivingSoonView";
+import AdminPanel from "./AdminPanel";
 import ItemSheet from "./ItemSheet";
 import OrderSheet from "./OrderSheet";
 import { useWindowWidth } from "../hooks/useMediaQuery";
@@ -308,8 +309,20 @@ export default function MobileShell({ c }) {
         </div>
       )}
 
+      {view === "admin" && c.isAdmin && (
+        <div className="px-4 pt-3">
+          <AdminPanel c={c} />
+        </div>
+      )}
+
       {view === "settings" && (
         <div className="px-4 pt-3 space-y-3">
+          {c.isAdmin && (
+            <button onClick={() => setView("admin")}
+              className="w-full flex items-center gap-2 bg-orange-50 border border-orange-300 text-orange-800 rounded-xl px-4 py-3 text-sm font-semibold">
+              <ShieldCheck size={14} /> Open admin panel
+            </button>
+          )}
           {c.failedEmails.length > 0 && !c.syncing && (
             <button onClick={c.retryFailedEmails}
               className="w-full flex items-center gap-2 bg-amber-50 border border-amber-300 text-amber-800 rounded-xl px-4 py-3 text-sm font-semibold">
