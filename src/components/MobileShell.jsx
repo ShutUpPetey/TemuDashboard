@@ -84,8 +84,8 @@ export default function MobileShell({ c }) {
   const rows = useMemo(() => {
     let r;
     if (chip === "__transit") r = c.allItems.filter((x) => x.status === "shipped");
-    else if (chip === "__review") r = c.allItems.filter((x) => x.estimated);
-    else if (chip === "__listprice") r = c.allItems.filter((x) => x.listedUnknown && !x.estimated);
+    else if (chip === "__review") r = c.allItems.filter((x) => x.estimated && isActiveStatus(x.status));
+    else if (chip === "__listprice") r = c.allItems.filter((x) => x.listedUnknown && !x.estimated && isActiveStatus(x.status));
     else if (chip === "All") r = c.allItems.filter((x) => isActiveStatus(x.status));
     else r = c.allItems.filter((x) => isActiveStatus(x.status) && x.category === chip);
     if (c.query) r = r.filter((x) => matchesQuery(itemSearchIndex(x), c.query));

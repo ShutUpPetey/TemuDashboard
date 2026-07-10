@@ -31,7 +31,11 @@ export default function OrderSheet({ c, orderId, onClose, onOpenItem, onOpenOrde
   if (!order) return null;
   const sibs = siblingOrders(c.data.orders, order);
   const family = [order, ...sibs];
-  const familyTotal = family.reduce((s, o) => s + (o.total || 0), 0);
+  // "Combined" is a spend total — cancelled/returned siblings don't belong
+  // in it (same rule as every other charged figure in the app), even
+  // though family.length below still counts every order that shared the
+  // email, cancelled or not.
+  const familyTotal = family.filter((o) => isActiveStatus(o.status)).reduce((s, o) => s + (o.total || 0), 0);
   const split = family.length > 1;
   const live = carrierInfoFor(c.carrier, order);
   const liveEta = carrierEtaText(live);

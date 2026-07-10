@@ -441,7 +441,7 @@ function OrdersView({ c, orders, expanded, setExpanded, goOrder, openItem, order
           {orderSort.dir === 1 ? "↑ asc" : "↓ desc"}
         </button>
         <span className="mono text-xs text-stone-500 ml-auto">
-          {orders.length} order{orders.length === 1 ? "" : "s"} · charged {fmt(orders.reduce((s, o) => s + (o.total || 0), 0))}
+          {orders.length} order{orders.length === 1 ? "" : "s"} · charged {fmt(orders.filter((o) => isActiveStatus(o.status)).reduce((s, o) => s + (o.total || 0), 0))}
         </span>
       </div>
       {orders.length === 0 ? (

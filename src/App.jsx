@@ -1306,7 +1306,10 @@ export default function App() {
   const stats = useMemo(() => buildStats(data.orders, activeOrders, analyticsItems, carrier), [data.orders, activeOrders, analyticsItems, carrier]);
   const review = useMemo(() => reviewQueue(data.orders), [data.orders]);
   const inTransit = useMemo(() => inTransitOrders(data.orders), [data.orders]);
-  const receivedFreeItems = useMemo(() => freeItems(allItems), [allItems]);
+  // freeItems reads analyticsItems (active + ignore-list filtered), so an
+  // ignored item disappears from this list too, not just the item-driven
+  // stats above.
+  const receivedFreeItems = useMemo(() => freeItems(analyticsItems), [analyticsItems]);
 
   /* ----- ctx: everything the shells need ----- */
   const ctx = {
