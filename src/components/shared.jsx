@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Clock, Truck, CheckCircle2, XCircle, Undo2, Package, X } from "lucide-react";
+import { Clock, Truck, CheckCircle2, XCircle, Undo2, Package, X, ThumbsUp, ThumbsDown, Repeat } from "lucide-react";
 
 export { isActiveStatus, annotateThumbs } from "../lib/derive";
 
@@ -192,6 +192,58 @@ export function LogPanel({ log, className = "" }) {
         ))}
       </div>
     </div>
+  );
+}
+
+/* ---------- rating controls ("Rate items" tab + ItemSheet) ----------
+   Shared here (rather than living inside RatingsView.jsx) because
+   ItemSheet also needs them for its own rating row — three view-level
+   consumers plus ItemSheet, same bar every other shared.jsx widget
+   clears. Both are plain, uncontrolled `<button>`s — the caller owns the
+   verdict/active state and passes it in, same pattern as StatusChip. */
+export function RatingButtons({ verdict, size = "sm", disabled = false, onUp, onDown }) {
+  const dim = size === "lg" ? "w-11 h-11" : size === "md" ? "w-9 h-9" : "w-8 h-8";
+  const iconSize = size === "lg" ? 20 : size === "md" ? 16 : 15;
+  const base = `${dim} rounded-full border grid place-items-center transition-colors active:scale-90 disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1`;
+  const upCls = verdict === "up"
+    ? "bg-emerald-600 border-emerald-600 text-white hover:bg-emerald-500"
+    : "border-stone-300 text-stone-400 hover:border-emerald-400 hover:text-emerald-600 hover:bg-emerald-50";
+  const downCls = verdict === "down"
+    ? "bg-rose-600 border-rose-600 text-white hover:bg-rose-500"
+    : "border-stone-300 text-stone-400 hover:border-rose-400 hover:text-rose-600 hover:bg-rose-50";
+  // Tap the active thumb again → clears; tap the opposite thumb → switches
+  // directly. Both are decided by the caller (c.rateItem's own toggle
+  // logic) — this component just reports which button was pressed.
+  return (
+    <span className="inline-flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+      <button type="button" disabled={disabled} onClick={onUp} aria-pressed={verdict === "up"}
+        aria-label={verdict === "up" ? "Clear rating" : "Like this item"}
+        className={`${base} ${upCls}`}>
+        <ThumbsUp size={iconSize} />
+      </button>
+      <button type="button" disabled={disabled} onClick={onDown} aria-pressed={verdict === "down"}
+        aria-label={verdict === "down" ? "Clear rating" : "Dislike this item"}
+        className={`${base} ${downCls}`}>
+        <ThumbsDown size={iconSize} />
+      </button>
+    </span>
+  );
+}
+
+/* Only ever rendered/enabled for a liked ("up") item — c.toggleBuyAgain is
+   a no-op otherwise (see App.jsx), so the control stays out of the way for
+   unrated/disliked rows instead of sitting there doing nothing. */
+export function BuyAgainToggle({ active, disabled = false, onToggle, compact = false }) {
+  return (
+    <button type="button" disabled={disabled}
+      onClick={(e) => { e.stopPropagation(); onToggle(); }}
+      aria-pressed={active}
+      aria-label={active ? "Remove from buy again list" : "Mark as want to buy again"}
+      className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition-colors active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 ${
+        active ? "bg-orange-600 border-orange-600 text-white hover:bg-orange-500" : "border-stone-300 text-stone-400 hover:border-orange-400 hover:text-orange-600 hover:bg-orange-50"
+      }`}>
+      <Repeat size={compact ? 12 : 13} />{!compact && "Buy again"}
+    </button>
   );
 }
 

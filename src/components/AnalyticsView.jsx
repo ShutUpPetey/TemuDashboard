@@ -34,9 +34,14 @@ function periodLabel(name, period) {
   if (!name || name === "?") return "Unknown";
   if (period === "year") return name;
   if (period === "month") return monthLabel(name);
-  const d = new Date(name);
-  if (isNaN(d)) return name;
-  const short = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  // Build the Date from explicit Y/M/D components (always local), not
+  // `new Date(name)` — a bare "YYYY-MM-DD" string parses as UTC midnight,
+  // which in any timezone behind UTC falls on the PREVIOUS local day and
+  // renders one day early here.
+  const [y, mo, d] = name.split("-").map(Number);
+  const dt = new Date(y, mo - 1, d);
+  if (isNaN(dt)) return name;
+  const short = dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   return period === "week" ? `Wk of ${short}` : short;
 }
 
@@ -76,7 +81,11 @@ function Callout({ label, primary, sub }) {
 export default function AnalyticsView({ c, onCategoryClick, onStatusClick }) {
   const { stats: s, activeItems } = c;
   const [period, setPeriod] = useState("month");
-  const periodData = useMemo(() => spendByPeriod(c.activeOrders, period), [c.activeOrders, period]);
+  const ignoredKeys = useMemo(
+    () => new Set((c.ignoredAnalyticsItems || []).map(analyticsItemKey)),
+    [c.ignoredAnalyticsItems]
+  );
+  const periodData = useMemo(() => spendByPeriod(c.activeOrders, period, ignoredKeys), [c.activeOrders, period, ignoredKeys]);
   const periodDelta = useMemo(() => {
     if (periodData.length < 2) return null;
     const cur = periodData[periodData.length - 1];

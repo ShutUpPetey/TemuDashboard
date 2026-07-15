@@ -1,17 +1,18 @@
 import React, { useMemo, useState } from "react";
 import {
   RefreshCw, Search, Settings2, BarChart3, ReceiptText,
-  LayoutGrid, RotateCcw, AlertTriangle, ExternalLink, CalendarDays, ShieldCheck,
+  LayoutGrid, RotateCcw, AlertTriangle, ExternalLink, CalendarDays, ShieldCheck, ThumbsUp,
 } from "lucide-react";
 import {
   CATEGORIES, fmt, pct, isActiveStatus, StatusChip, CropThumb, annotateThumbs, Elapsed, Empty, LogPanel,
   carrierInfoFor, carrierEtaText,
 } from "./shared";
-import { siblingOrders, matchesQuery, itemSearchIndex, orderSearchIndex, arrivingCalendar } from "../lib/derive";
+import { siblingOrders, matchesQuery, itemSearchIndex, orderSearchIndex, arrivingCalendar, analyticsItemKey } from "../lib/derive";
 import { estimateCostPerCall } from "../lib/anthropic";
 import SettingsPanel from "./SettingsPanel";
 import AnalyticsView from "./AnalyticsView";
 import ArrivingSoonView from "./ArrivingSoonView";
+import RatingsView from "./RatingsView";
 import AdminPanel from "./AdminPanel";
 import ItemSheet from "./ItemSheet";
 import OrderSheet from "./OrderSheet";
@@ -197,7 +198,7 @@ export default function MobileShell({ c }) {
           ) : (
             <div className="grid grid-cols-2 gap-3 px-4">
               {rows.map((it, i) => (
-                <ItemCard key={`${it.orderId}-${it.itemIdx}-${i}`} it={it} size={cardSize} onOpen={() => setSheet(it)} />
+                <ItemCard key={`${it.orderId}-${it.itemIdx}-${i}`} it={it} size={cardSize} onOpen={() => setSheet(it)} rating={c.ratings[analyticsItemKey(it)]} />
               ))}
             </div>
           )}
@@ -309,6 +310,12 @@ export default function MobileShell({ c }) {
         </div>
       )}
 
+      {view === "ratings" && (
+        <div className="px-4 pt-3">
+          <RatingsView c={c} openItem={(it) => setSheet(it)} mobile />
+        </div>
+      )}
+
       {view === "admin" && c.isAdmin && (
         <div className="px-4 pt-3">
           <AdminPanel c={c} />
@@ -323,6 +330,13 @@ export default function MobileShell({ c }) {
               <ShieldCheck size={14} /> Open admin panel
             </button>
           )}
+          {/* Rate items — no free dock slot (fixed 5-icon row), so this
+              follows the identical Settings-entry pattern Admin already
+              uses rather than cramming a 6th dock icon into a max-w-md pill. */}
+          <button onClick={() => setView("ratings")}
+            className="w-full flex items-center gap-2 bg-white border border-stone-200 text-stone-700 rounded-xl px-4 py-3 text-sm font-semibold">
+            <ThumbsUp size={14} /> Rate items{c.ratingQueues.toRate.length ? ` (${c.ratingQueues.toRate.length} to rate)` : ""}
+          </button>
           {c.failedEmails.length > 0 && !c.syncing && (
             <button onClick={c.retryFailedEmails}
               className="w-full flex items-center gap-2 bg-amber-50 border border-amber-300 text-amber-800 rounded-xl px-4 py-3 text-sm font-semibold">
@@ -456,8 +470,9 @@ function UnmatchedStatusRow({ u, c }) {
 
 /* ================= Card ================= */
 
-function ItemCard({ it, size, onOpen }) {
+function ItemCard({ it, size, onOpen, rating }) {
   const off = it.discountPct != null && it.discountPct > 0.005 ? `−${(it.discountPct * 100).toFixed(0)}%` : null;
+  const ratingGlyph = rating?.verdict === "up" ? "👍" : rating?.verdict === "down" ? "👎" : null;
   const dotCls = it.status === "delivered" ? "bg-emerald-500" : it.status === "shipped" ? "bg-blue-500" : it.status === "cancelled" || it.status === "returned" ? "bg-red-400" : "bg-stone-400";
   const dotGlyph = it.status === "delivered" ? "✓" : it.status === "shipped" ? "✈" : "•";
   return (
@@ -472,7 +487,9 @@ function ItemCard({ it, size, onOpen }) {
         <span className={`absolute top-2 right-2 w-5 h-5 rounded-full grid place-items-center text-[10px] text-white ${dotCls}`}>{dotGlyph}</span>
       </div>
       <div className="px-2.5 pt-2 pb-2.5">
-        <div className="text-[12.5px] font-semibold leading-tight h-8 overflow-hidden">{it.name || "—"}</div>
+        <div className="text-[12.5px] font-semibold leading-tight h-8 overflow-hidden">
+          {it.name || "—"}{ratingGlyph && <span className="ml-1">{ratingGlyph}</span>}{rating?.buyAgain && <span className="ml-0.5">🔁</span>}
+        </div>
         <div className="flex items-baseline gap-1.5 mt-1">
           <span className="mono text-[15px] font-semibold">{fmt(it.paid)}</span>
           {!it.estimated && !it.listedUnknown && it.listed != null && <span className="text-[11px] text-stone-400 line-through">{fmt(it.listed)}</span>}

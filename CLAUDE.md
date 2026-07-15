@@ -31,8 +31,10 @@ price is unknown, an "Arriving Soon" 14-day delivery calendar with
 past-guarantee/stale-tracking flags, a much-expanded Analytics tab (KPIs,
 a D/W/M/Y stock-chart-style spend-over-time toggle, per-item "ignore from
 analytics" with a restore list, a free-items-received list, carrier
-performance, funnel, price histogram), a first-run Welcome tour, and
-optional multi-user admin oversight (directory + read-only "view as user").
+performance, funnel, price histogram), a first-run Welcome tour, a "Rate
+items" tab (thumbs up/down + buy-again flags on delivered items — see Key
+mechanisms), and optional multi-user admin oversight (directory +
+read-only "view as user").
 
 **2026-07-10 multi-agent review:** `IMPROVEMENTS.md` (repo root) is the ranked
 issue/improvement tracker produced by parallel UI/UX, architecture, and
@@ -127,9 +129,17 @@ estimated, listedUnknown, thumbUrl, thumbY }` — `estimated` means `paid` itsel
 is a guess (multi-item split order, even-split fallback); `listedUnknown`
 means `paid` is exact but the pre-discount `listed` price was never shown
 (single-item split order — see `applyDiscounts` in `lib/discounts.js`); the
-two flags are mutually exclusive. Store: `{ orders, processedIds, lastSync,
-autoSync, updatedAt }` under IndexedDB key `temu-manifest-v1`, mirrored to
-Firebase `manifest/{uid}/state` as `{json, updatedAt}`.
+two flags are mutually exclusive. Store: `{ orders, processedIds, ratings,
+lastSync, autoSync, updatedAt }` under IndexedDB key `temu-manifest-v1`,
+mirrored to Firebase `manifest/{uid}/state` as `{json, updatedAt}`.
+Ratings: `ratings` is a top-level map `{ "orderId:itemIdx": { verdict:
+"up"|"down"|null, buyAgain: bool, ratedAt: ms } }` (key = `analyticsItemKey`)
+— deliberately NOT stored on item objects (items have no stable id and
+their arrays get wholesale-replaced by re-reads), and NOT localStorage-only
+like the analytics ignore list (a rating is a fact, not a view preference,
+so it syncs). Keys are never deleted; clearing a thumb writes
+`verdict: null` with a fresh `ratedAt`, which propagates as a genuine
+clear instead of resurrecting via the union merge.
 
 Cloud backups (written ONLY by the GitHub Action): `manifest/{uid}/backups/
 {YYYY-MM-DD}` = `{json, savedAt}` — one snapshot of the state blob per day,
@@ -251,29 +261,48 @@ Firebase sign-in.
   failed to extract), items get `paid: null` + `estimated: true` instead of
   the old silent, unflagged $0.00.
 - **Analytics: spend-over-time period toggle, per-item ignore, free items
-  (`AnalyticsView.jsx` + `lib/derive.js`)**: `spendByPeriod(orders, period)`
-  buckets ACTIVE ORDERS' charged totals by day/week/month/year for a
-  stock-chart-style D/W/M/Y toggle — deliberately order-level (a "week"
-  bucket sums `order.total`), so it's unaffected by the item-level ignore
-  list below. The "ignore from analytics" feature (an "Ignore" button on
-  each Top Items row) is a per-device, localStorage-only preference
+  (`AnalyticsView.jsx` + `lib/derive.js`)**: `spendByPeriod(orders, period,
+  ignoredKeys)` buckets ACTIVE ORDERS' charged totals by day/week/month/year
+  for a stock-chart-style D/W/M/Y toggle. It starts from each order's actual
+  `total` (not a re-sum of its items — that total also covers shipping/tax,
+  which items don't carry) and then SUBTRACTS the paid amount of any ignored
+  item within that order, so the "ignore from analytics" toggle moves this
+  chart too — first shipped as order-level-only and exempt from the ignore
+  list, but users expect ignoring an item to remove it from analytics
+  everywhere, not just some views, so it was changed to subtract per-item.
+  The "ignore from analytics" feature itself (an "Ignore" button on each Top
+  Items row) is a per-device, localStorage-only preference
   (`temu-analytics-ignore-v1`, keyed by `analyticsItemKey()` =
   `orderId:itemIdx`) — NOT synced to Firebase/IndexedDB and NOT written to
   order data, since it's a view preference ("this one gift skews my spend
   stats"), not a fact about the order. App.jsx filters `activeItems` down to
   `analyticsItems` (ignored items removed) before calling `buildStats()`, so
   every ITEM-driven stat (top items, category spend, price histogram,
-  saved/avg-discount) respects the ignore list — but `buildStats()` is still
-  called with the full `activeOrders`, so ORDER-driven stats (hero "Total
-  spent", funnel, carrier performance, delivery time) do NOT change when an
-  item is ignored — both are intentionally exempt (a $150 gift's ORDER still
-  cost $150; ignoring it from the item breakdown doesn't rewrite what was
-  actually charged). A
-  separate "Ignored from analytics" section lists ignored items with a
-  Restore button. `freeItems()` (also `lib/derive.js`) lists delivered items
-  priced at exactly `paid === 0` with `listed > 0` — i.e. genuinely
+  saved/avg-discount) respects the ignore list. The hero "Total spent
+  (lifetime)" KPI (`s.spent`, from `buildStats`'s `activeOrders.reduce`) and
+  funnel/carrier/delivery-time stats are the one place STILL intentionally
+  unaffected by the ignore list — they're built straight from `activeOrders`,
+  not `analyticsItems` — since "lifetime total charged" is meant to stay a
+  pure fact even while other views let you declutter around a one-off
+  expensive item. A separate "Ignored from analytics" section lists ignored
+  items with a Restore button. `freeItems()` (also `lib/derive.js`) lists
+  delivered items priced at exactly `paid === 0` with `listed > 0` — i.e. genuinely
   coupon/credit-covered per the `ba5db1c` discount-factor-clamp fix, not
-  merely estimated-as-zero.
+  merely estimated-as-zero. `spendByPeriod` also fills EVERY intermediate
+  day/week/month/year between the first and last active order with a
+  $0-spend bucket (`stepKey()`), instead of only emitting keys that have an
+  order — a chart that silently skips empty buckets draws adjacent orders
+  as if they were next to each other in time even when they're weeks
+  apart, which (per user report) reads as "the dates are off." Building
+  and stepping through those keys had a real timezone bug: `new
+  Date("YYYY-MM-DD")` (no time component) parses as UTC MIDNIGHT per spec,
+  so in any timezone behind UTC that instant falls on the PREVIOUS local
+  day — `periodKey`/`stepKey` (`lib/derive.js`) and `periodLabel`
+  (`AnalyticsView.jsx`) all now build/format dates from explicit Y/M/D
+  components (`new Date(y, m, d)`, always local) and never round-trip
+  through `.toISOString()` or `new Date(dateOnlyString)`, so bucket keys
+  and their on-chart labels can't drift a day off in either direction
+  regardless of the viewer's timezone.
 - **Unified search + filter/sort (`lib/derive.js`: `matchesQuery`,
   `itemSearchIndex`, `orderSearchIndex`)**: the single search box (shared
   state, `c.query`) now matches across BOTH Items and Orders views in both
@@ -343,6 +372,26 @@ Firebase sign-in.
   which viewing another user's data could write to their tree or the
   admin's own; a bug here fails closed (Firebase rules reject it) rather
   than open.
+- **Item ratings ("Rate items" tab, `RatingsView.jsx`)**: thumbs up/down +
+  independent buy-again flag (gated to liked items; un-liking auto-clears
+  it) on DELIVERED items only. Three sections: to-rate queue (newest
+  delivered first, ranked by the same `deliveredAtFor` chain Arriving
+  Soon's "recently delivered" uses), Liked/Unliked panels, buy-again list —
+  all derived by `ratingQueues()` (`lib/derive.js`). Cloud sync: ratings
+  merge per-key newest-`ratedAt`-wins via `mergeRatings`
+  (`lib/syncMerge.js`); the live-listener echo check and push-back
+  staleness check BOTH consider ratings (`sameRatingSet`/
+  `remoteRatingsStale`) — orders-only checks would silently drop a
+  ratings-only change. Because keys are positional (`orderId:itemIdx`),
+  every path that wholesale-replaces an order's `items[]` (rereadOrder,
+  fixEstimatedPrices, fixAllEstimatedPrices, AND the full re-sync rebuild
+  in `sync(true)`) re-keys that order's ratings by case-insensitive name
+  match via `remapRatingsAfterReplace` — unmatched ratings are DROPPED,
+  never mis-attached. Rating an item does NOT stamp the order's
+  `updatedAt` (it's not an order mutation). Mobile reaches the tab via a
+  Settings-panel button (the Admin pattern); the tab is desktop-nav
+  between Analytics and Needs Review, with a plain-gray unrated count
+  (deliberately not amber — a backlog isn't a problem).
 - **Thumbnails (CropThumb)**: receipt PNG is one tall image; crop math uses
   measured natural size + rows-per-image; trusts Claude's `y` only when the
   image's y-values are monotonic and sanely spaced (`annotateThumbs`).

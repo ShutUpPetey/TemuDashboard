@@ -64,15 +64,55 @@ export function sameOrderSet(a, b) {
   return aArr.every((o) => bMap.get(o.id) === (o.updatedAt || 0));
 }
 
+/* ---------- Ratings merge ----------
+   Item ratings (see CLAUDE.md "Rate items") live in a separate top-level
+   map, keyed `orderId:itemIdx`, and merge the same way orders do: union of
+   both sides, newest-per-key wins. Unlike orders, a rating is NEVER
+   deleted — clearing a thumb writes verdict:null rather than removing the
+   key — so there's no tombstone problem here and "newest ratedAt wins" is
+   unconditionally correct. */
+
+/* Union of both ratings maps, newest ratedAt wins per key. Never deletes —
+   see above. */
+export function mergeRatings(localRatings, remoteRatings) {
+  const out = { ...(localRatings || {}) };
+  for (const [key, r] of Object.entries(remoteRatings || {})) {
+    const existing = out[key];
+    if (!existing || (r.ratedAt || 0) > (existing.ratedAt || 0)) out[key] = r;
+  }
+  return out;
+}
+
+/* Fingerprint check (key + ratedAt only) — mirrors sameOrderSet above,
+   used to detect "nothing new" without deep-equality. */
+export function sameRatingSet(a, b) {
+  const aObj = a || {}, bObj = b || {};
+  const aKeys = Object.keys(aObj), bKeys = Object.keys(bObj);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((k) => bObj[k] && bObj[k].ratedAt === aObj[k].ratedAt);
+}
+
+/* Mirrors remoteIsStale above — true if the merged ratings have anything
+   remote doesn't (new key or newer ratedAt), i.e. remote needs the merge
+   pushed back to it. */
+export function remoteRatingsStale(mergedRatings, remoteRatings) {
+  const remoteObj = remoteRatings || {};
+  return Object.entries(mergedRatings || {}).some(([k, r]) => {
+    const rem = remoteObj[k];
+    return !rem || (r.ratedAt || 0) > (rem.ratedAt || 0);
+  });
+}
+
 /* Merges two whole app-state blobs. Orders merge per-order (see above);
-   processedIds is a plain union (never loses "already processed" info);
-   lastSync/autoSync are informational bookkeeping, not safety-critical,
-   so they're just taken from whichever side has the newer top-level
-   updatedAt. */
+   ratings merge per-key (see above); processedIds is a plain union (never
+   loses "already processed" info); lastSync/autoSync are informational
+   bookkeeping, not safety-critical, so they're just taken from whichever
+   side has the newer top-level updatedAt. */
 export function mergeState(local, remote) {
   const localOrders = local?.orders || [];
   const remoteOrders = remote?.orders || [];
   const orders = mergeOrders(localOrders, remoteOrders);
+  const ratings = mergeRatings(local?.ratings, remote?.ratings);
   const processedIds = Array.from(new Set([...(local?.processedIds || []), ...(remote?.processedIds || [])]));
   const localTs = local?.updatedAt || 0;
   const remoteTs = remote?.updatedAt || 0;
@@ -80,6 +120,7 @@ export function mergeState(local, remote) {
   return {
     ...(local || {}),
     orders,
+    ratings,
     processedIds,
     lastSync: preferRemote ? (remote?.lastSync ?? local?.lastSync ?? null) : (local?.lastSync ?? null),
     autoSync: preferRemote ? (remote?.autoSync ?? local?.autoSync ?? true) : (local?.autoSync ?? true),

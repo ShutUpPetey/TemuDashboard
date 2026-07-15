@@ -2,19 +2,20 @@ import React, { useMemo, useState } from "react";
 import {
   RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, Search, X,
   Settings2, Download, RotateCcw, Pencil, Save, Trash2, LayoutDashboard,
-  ReceiptText, Tags, BarChart3, Truck, ExternalLink, CalendarDays, ShieldCheck,
+  ReceiptText, Tags, BarChart3, Truck, ExternalLink, CalendarDays, ShieldCheck, ThumbsUp,
 } from "lucide-react";
 import {
   CATEGORIES, STATUS_META, fmt, pct, isActiveStatus,
   StatusChip, CropThumb, annotateThumbs, Elapsed, Empty, LogPanel,
   carrierInfoFor, carrierEtaText, CARRIER_STATUS_LABEL,
 } from "./shared";
-import { sparkPoints, monthDelta, siblingOrders, matchesQuery, itemSearchIndex, orderSearchIndex, arrivingCalendar } from "../lib/derive";
+import { sparkPoints, monthDelta, siblingOrders, matchesQuery, itemSearchIndex, orderSearchIndex, arrivingCalendar, analyticsItemKey } from "../lib/derive";
 import { etaEndDate } from "../lib/gmail";
 import { estimateCostPerCall } from "../lib/anthropic";
 import SettingsPanel from "./SettingsPanel";
 import AnalyticsView from "./AnalyticsView";
 import ArrivingSoonView from "./ArrivingSoonView";
+import RatingsView from "./RatingsView";
 import AdminPanel from "./AdminPanel";
 import ItemSheet from "./ItemSheet";
 import OrderSheet from "./OrderSheet";
@@ -120,12 +121,16 @@ export default function DesktopShell({ c }) {
     ["orders", "Orders", ReceiptText, c.data.orders.length],
     ["items", "Items", Tags, c.allItems.length],
     ["analytics", "Analytics", BarChart3, null],
+    // Plain gray count, deliberately NOT in WARN_NAV — an unrated backlog
+    // isn't a data-quality problem like Needs Review or a deadline like
+    // Arriving Soon, so it doesn't borrow that "something's wrong" amber.
+    ["ratings", "Rate items", ThumbsUp, c.ratingQueues.toRate.length || null],
     ["review", "Needs review", AlertTriangle, reviewCount || null],
     ...(c.isAdmin ? [["admin", "Admin", ShieldCheck, null]] : []),
     ["settings", "Settings", Settings2, null],
   ];
   const WARN_NAV = { review: reviewCount, arriving: overdueCount };
-  const TITLES = { overview: "Overview", arriving: "Arriving soon", orders: "Orders", items: "Items", analytics: "Analytics", review: "Needs review", admin: "Admin", settings: "Settings" };
+  const TITLES = { overview: "Overview", arriving: "Arriving soon", orders: "Orders", items: "Items", analytics: "Analytics", ratings: "Rate items", review: "Needs review", admin: "Admin", settings: "Settings" };
 
   return (
     <div className="min-h-screen bg-stone-100 text-stone-900 flex" style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
@@ -225,6 +230,7 @@ export default function DesktopShell({ c }) {
                 onStatusClick={(status) => goItemsFiltered({ status })} />
             </div>
           )}
+          {view === "ratings" && <RatingsView c={c} openItem={setSheetItem} />}
           {view === "review" && <ReviewView c={c} goEditOrder={goEditOrder} />}
           {view === "admin" && c.isAdmin && <AdminPanel c={c} />}
           {view === "settings" && (
@@ -400,6 +406,20 @@ function FixAllButton({ c, estimatedItems }) {
       Fix all {orderIds.length} order{orderIds.length === 1 ? "" : "s"}
       <span className="mono font-normal">(~{fmt(total)}, ~{fmt(cost.perCall)}/order)</span>
     </button>
+  );
+}
+
+/* Display-only rated/buy-again glyph next to an item's name in the Items
+   table — cheap, consistent with how estimated/listedUnknown already get
+   inline ≈/🏷 glyphs elsewhere. No click target of its own; the row is
+   already clickable and opens ItemSheet, where the real rating controls
+   live (see RatingsView / ItemSheet). */
+function RatingGlyph({ rating }) {
+  if (!rating || (!rating.verdict && !rating.buyAgain)) return null;
+  return (
+    <span className="ml-1 text-[11px]" title={rating.verdict === "up" ? "Liked" : rating.verdict === "down" ? "Unliked" : ""}>
+      {rating.verdict === "up" && "👍"}{rating.verdict === "down" && "👎"}{rating.buyAgain && "🔁"}
+    </span>
   );
 }
 
@@ -702,6 +722,7 @@ function ItemsView({ c, filteredItems, th, catFilter, setCatFilter, statusFilter
                   <CropThumb url={it.thumbUrl} y={it.thumbY} rows={it.thumbRows} idx={it.thumbIdx} trustY={it.thumbTrustY} size={c.thumbSize} onClick={() => it.thumbUrl && c.setLightbox(it.thumbUrl)} />
                 </td>
                 <td className="py-1.5 pr-2">{it.name}{it.qty > 1 && <span className="text-stone-400"> ×{it.qty}</span>}
+                  <RatingGlyph rating={c.ratings[analyticsItemKey(it)]} />
                   <div>
                     <button onClick={(e) => { e.stopPropagation(); goOrder(it.orderId); }}
                       title="Jump to this order"

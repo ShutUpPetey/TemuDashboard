@@ -80,7 +80,7 @@ function asDay(d) {
       effect rather than an email (no statusEmailAt to use) or any other
       path that set status without going through the email loop.
    4. order.date as a last resort. */
-function deliveredAtFor(order, carrierMap) {
+export function deliveredAtFor(order, carrierMap) {
   const info = order.tracking?.number && carrierMap ? carrierMap[order.tracking.number] : null;
   if (info?.status === "Delivered" && info.eventTime) return new Date(info.eventTime);
   if (order.statusEmailAt) return new Date(order.statusEmailAt);
@@ -231,6 +231,97 @@ export function reviewQueue(orders) {
   return { estimatedItems, listPriceUnknownItems, emptyOrders };
 }
 
+/* ---------- Item ratings ("Rate items" tab) ----------
+   Ratings live in a top-level `ratings` map on the store, keyed
+   `orderId:itemIdx` (analyticsItemKey), NOT on the item objects
+   themselves — an item has no stable id of its own, only its position
+   within its order, and several code paths (rereadOrder,
+   fixEstimatedPrices) wholesale-replace an order's items[] array, which
+   would silently discard anything stored on the item object. See
+   remapRatingsAfterReplace below for how those two paths carry ratings
+   forward instead of just losing them. */
+
+/* Re-keys one order's ratings after its items[] array is wholesale-
+   replaced by a fresh vision parse (rereadOrder / fixEstimatedPrices —
+   both re-run a Claude vision call against a possibly-different email and
+   swap in a brand-new items array, so the old orderId:itemIdx keys may now
+   point at a different item, or at nothing). Matches old→new items by
+   exact case-insensitive, trimmed name — the same name/row-order stability
+   vision already relies on for CropThumb's index math. A rating whose old
+   item has no matching (and not-already-claimed) name in the new array is
+   DROPPED rather than left attached to the old index — failing safe
+   (silently forgotten) beats failing unsafe (silently attached to the
+   wrong item). `claimed` prevents two old ratings from both landing on the
+   same new index when names repeat. */
+export function remapRatingsAfterReplace(ratings, orderId, oldItems, newItems) {
+  if (!ratings) return {};
+  const norm = (n) => (n || "").trim().toLowerCase();
+  const claimed = new Set();
+  const out = { ...ratings };
+  // Old and new keys share the same `orderId:index` namespace, so a
+  // reorder can have iteration N's remapped write land at a key that
+  // iteration N+1 is about to `delete` as an old key (e.g. items swap
+  // positions 0↔1). Writes are collected separately and applied only
+  // AFTER every old key for this order has been deleted, so a later
+  // delete can never clobber an earlier remap.
+  const toWrite = {};
+  (oldItems || []).forEach((oldIt, oldIdx) => {
+    const oldKey = analyticsItemKey({ orderId, itemIdx: oldIdx });
+    const rating = ratings[oldKey];
+    if (!rating) return;
+    delete out[oldKey];
+    const target = norm(oldIt?.name);
+    const newIdx = (newItems || []).findIndex((newIt, i) => !claimed.has(i) && norm(newIt?.name) === target);
+    if (newIdx >= 0) {
+      claimed.add(newIdx);
+      toWrite[analyticsItemKey({ orderId, itemIdx: newIdx })] = rating;
+    }
+    // else: no matching new item — dropped, see header comment.
+  });
+  return { ...out, ...toWrite };
+}
+
+/* Three-section data for the "Rate items" tab: a to-rate queue, liked/
+   disliked lists, and a buy-again list. Only DELIVERED, active-status
+   items are rateable — matches the owner's "rate what arrived" framing,
+   and keeps cancelled/returned items off every rating surface for
+   consistency with how the rest of the app already gates on
+   isActiveStatus (funnel, spend, analytics). Once a verdict is set the
+   item leaves `toRate` until cleared back to neutral (verdict: null sends
+   it right back — "still needs an actual rating" is the correct read of a
+   cleared thumb). Reuses deliveredAtFor's carrier-eventTime →
+   statusEmailAt → updatedAt → date fallback chain rather than re-deriving
+   "when did this arrive" a second way. */
+export function ratingQueues(orders, ratings = {}, carrierMap = {}) {
+  const toRate = [], liked = [], disliked = [], buyAgain = [];
+  for (const o of orders) {
+    const status = o.status || "ordered";
+    if (!isActiveStatus(status)) continue;   // cancelled/returned excluded
+    if (status !== "delivered") continue;    // only received items are rateable
+    const deliveredAt = deliveredAtFor(o, carrierMap);
+    annotateThumbs(o.items || []).forEach((it, itemIdx) => {
+      const key = analyticsItemKey({ orderId: o.id, itemIdx });
+      const r = ratings[key];
+      const row = {
+        ...it, orderId: o.id, date: o.date, status, itemIdx,
+        verdict: r?.verdict || null,
+        buyAgain: !!r?.buyAgain,
+        ratedAt: r?.ratedAt || null,
+        deliveredAt: deliveredAt && !isNaN(deliveredAt) ? deliveredAt.toISOString() : null,
+      };
+      if (!r || !r.verdict) toRate.push(row);
+      else if (r.verdict === "up") liked.push(row);
+      else if (r.verdict === "down") disliked.push(row);
+      if (r?.buyAgain) buyAgain.push(row);
+    });
+  }
+  toRate.sort((a, b) => (b.deliveredAt || "").localeCompare(a.deliveredAt || ""));
+  liked.sort((a, b) => (b.ratedAt || 0) - (a.ratedAt || 0));
+  disliked.sort((a, b) => (b.ratedAt || 0) - (a.ratedAt || 0));
+  buyAgain.sort((a, b) => (b.ratedAt || 0) - (a.ratedAt || 0));
+  return { toRate, liked, disliked, buyAgain };
+}
+
 /* ---------- search index helpers ----------
    One flat, lowercased, space-joined string per row/order so a single
    search box can match ANY field — item name, PO number, date, status,
@@ -259,39 +350,103 @@ export function orderSearchIndex(o) {
   ]);
 }
 
+/* Stable per-item key for the "ignore from analytics" toggle — an item has
+   no id of its own, only its position within its order. Declared above
+   spendByPeriod since that function also needs it. */
+export const analyticsItemKey = (it) => `${it.orderId}:${it.itemIdx}`;
+
 /* ---------- Spend over time, stock-chart style (day/week/month/year) ----------
-   Buckets ACTIVE orders' charged totals — deliberately order-level, not
-   item-level, so toggling an item out of analytics (see analyticsItemKey
-   below) never moves this chart: an order's charged total is a financial
-   fact independent of which of ITS items get excluded from the item-level
-   breakdowns (top items, category spend, price histogram). */
+   Buckets ACTIVE orders' charged totals. Starts from each order's actual
+   `total` (not a sum of its items — that total also covers shipping/tax,
+   which items don't carry), then SUBTRACTS the paid amount of any ignored
+   item in that order, so an "ignore from analytics" toggle moves this
+   chart too, not just the item-driven breakdowns (top items, category
+   spend, price histogram) — matches user expectation that ignoring an
+   item removes it from analytics everywhere, not just some views.
+   `ignoredKeys` is optional (a Set of analyticsItemKey strings) so
+   existing callers without an ignore list keep working. */
+// `new Date("YYYY-MM-DD")` (no time component) is parsed as UTC MIDNIGHT
+// per spec — in any timezone behind UTC, that instant falls on the
+// PREVIOUS local calendar day, so any later .toISOString() (always UTC)
+// or local getter used carelessly can silently shift bucket keys back a
+// day. Every date/period helper below constructs Dates from explicit
+// Y/M/D components (`new Date(y, m, d)`, always local) and formats them
+// back the same way, so nothing ever round-trips through a UTC string.
+function parseYMD(dateStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(dateStr || "");
+  if (m) return { y: +m[1], mo: +m[2] - 1, d: +m[3] };
+  const dt = new Date(dateStr);
+  return isNaN(dt) ? null : { y: dt.getFullYear(), mo: dt.getMonth(), d: dt.getDate() };
+}
+
+function formatYMD(y, mo, d) {
+  return `${y}-${String(mo + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+
 function periodKey(dateStr, period) {
   if (!dateStr) return "?";
   if (period === "year") return dateStr.slice(0, 4);
   if (period === "month") return dateStr.slice(0, 7);
-  const d = new Date(dateStr);
-  if (isNaN(d)) return "?";
-  d.setHours(0, 0, 0, 0);
-  if (period === "week") d.setDate(d.getDate() - d.getDay()); // back to Sunday
-  return d.toISOString().slice(0, 10);
+  const p = parseYMD(dateStr);
+  if (!p) return "?";
+  const dt = new Date(p.y, p.mo, p.d);
+  if (period === "week") dt.setDate(dt.getDate() - dt.getDay()); // back to Sunday
+  return formatYMD(dt.getFullYear(), dt.getMonth(), dt.getDate());
 }
 
-export function spendByPeriod(orders, period = "month") {
+// Advances a bucket key to the NEXT one of the same period, so gaps between
+// orders (a day/week/month/year with zero active spend) can be filled in
+// rather than silently skipped on the x-axis — a chart that jumps straight
+// from one order date to the next, with no visual gap, reads as if orders
+// are adjacent in time when they might be weeks apart, and (per user
+// report) can make it look like dates are "off" when really an in-between
+// empty bucket was just never drawn.
+function stepKey(key, period) {
+  if (period === "year") return String(Number(key) + 1);
+  if (period === "month") {
+    const [y, m] = key.split("-").map(Number);
+    const next = new Date(y, m - 1 + 1, 1);
+    return `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}`;
+  }
+  const [y, m, d] = key.split("-").map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() + (period === "week" ? 7 : 1));
+  return formatYMD(dt.getFullYear(), dt.getMonth(), dt.getDate());
+}
+
+export function spendByPeriod(orders, period = "month", ignoredKeys = null) {
   const byKey = {};
   const byKeyCount = {};
   orders.forEach((o) => {
     const k = periodKey(o.date, period);
-    byKey[k] = (byKey[k] || 0) + (o.total || 0);
+    let total = o.total || 0;
+    if (ignoredKeys && ignoredKeys.size) {
+      (o.items || []).forEach((it, itemIdx) => {
+        if (ignoredKeys.has(analyticsItemKey({ orderId: o.id, itemIdx }))) total -= (it.paid || 0) * (it.qty || 1);
+      });
+    }
+    byKey[k] = (byKey[k] || 0) + total;
     byKeyCount[k] = (byKeyCount[k] || 0) + 1;
   });
-  return Object.entries(byKey)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([name, v]) => ({ name, spend: +v.toFixed(2), count: byKeyCount[name] || 0 }));
-}
 
-/* Stable per-item key for the "ignore from analytics" toggle — an item has
-   no id of its own, only its position within its order. */
-export const analyticsItemKey = (it) => `${it.orderId}:${it.itemIdx}`;
+  const knownKeys = Object.keys(byKey).filter((k) => k !== "?").sort();
+  if (knownKeys.length === 0) {
+    // Nothing dateable at all — fall back to whatever we've got ("?" only).
+    return Object.entries(byKey).map(([name, v]) => ({ name, spend: +v.toFixed(2), count: byKeyCount[name] || 0 }));
+  }
+
+  const filled = [];
+  let cur = knownKeys[0];
+  const last = knownKeys[knownKeys.length - 1];
+  let guard = 0;
+  while (cur <= last && guard++ < 5000) { // guard: pathological/corrupt date data shouldn't infinite-loop
+    filled.push({ name: cur, spend: +(byKey[cur] || 0).toFixed(2), count: byKeyCount[cur] || 0 });
+    if (cur === last) break;
+    cur = stepKey(cur, period);
+  }
+  if (byKey["?"]) filled.push({ name: "?", spend: +byKey["?"].toFixed(2), count: byKeyCount["?"] || 0 });
+  return filled;
+}
 
 /* Items priced at exactly $0.00 (a coupon/credit fully covered the order —
    see applyDiscounts' factor clamp in lib/discounts.js) that have actually

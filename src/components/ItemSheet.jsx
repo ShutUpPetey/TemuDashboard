@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Pencil, Save, ExternalLink, RotateCcw, ReceiptText } from "lucide-react";
-import { CATEGORIES, fmt, StatusChip, CropThumb, carrierInfoFor, carrierEtaText } from "./shared";
-import { siblingOrders, annotateThumbs } from "../lib/derive";
+import { CATEGORIES, fmt, StatusChip, CropThumb, carrierInfoFor, carrierEtaText, RatingButtons, BuyAgainToggle } from "./shared";
+import { siblingOrders, annotateThumbs, analyticsItemKey } from "../lib/derive";
 
 /* ============================================================
    Item detail sheet — the connective hub of the app, shared by
@@ -124,6 +124,28 @@ export default function ItemSheet({ c, it, onClose, onViewOrder, desktop = false
                   Track with {order.tracking.carrier || "carrier"} ↗
                 </button>
               )}
+
+              {/* Rating row — a second, always-reachable rating entry point
+                  alongside the "Rate items" tab; gated to delivered items,
+                  same as everywhere else ratings surface. Reads/writes the
+                  top-level ratings map (NOT a field on `it` — see
+                  lib/derive.js's ratingQueues header comment). */}
+              {status === "delivered" && (() => {
+                const rating = c.ratings[analyticsItemKey(it)];
+                const verdict = rating?.verdict || null;
+                return (
+                  <div className="mt-4 flex items-center gap-3 bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5">
+                    <span className="text-[11px] font-semibold text-stone-500 uppercase tracking-wide mr-auto">How was it?</span>
+                    <RatingButtons verdict={verdict} size="lg" disabled={c.syncing}
+                      onUp={() => c.rateItem(it.orderId, it.itemIdx, "up")}
+                      onDown={() => c.rateItem(it.orderId, it.itemIdx, "down")} />
+                    {verdict === "up" && (
+                      <BuyAgainToggle active={!!rating?.buyAgain} disabled={c.syncing}
+                        onToggle={() => c.toggleBuyAgain(it.orderId, it.itemIdx)} />
+                    )}
+                  </div>
+                );
+              })()}
 
               <div className="mt-3 divide-y divide-dashed divide-stone-200 text-[13.5px]">
                 <Row k="Order">

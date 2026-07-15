@@ -11,8 +11,8 @@ import {
   extractHtml, extractSection, extractAllSections, extractImgSrcs, extractPoNumber, extractSubOrders,
   extractOrderLink, extractEta, isOrderDetailLink, extractPoFromBody, extractTracking,
 } from "./lib/gmail";
-import { buildStats, reviewQueue, inTransitOrders, isActiveStatus, analyticsItemKey, freeItems } from "./lib/derive";
-import { mergeState, remoteIsStale, sameOrderSet } from "./lib/syncMerge";
+import { buildStats, reviewQueue, inTransitOrders, isActiveStatus, analyticsItemKey, freeItems, ratingQueues, remapRatingsAfterReplace } from "./lib/derive";
+import { mergeState, remoteIsStale, sameOrderSet, remoteRatingsStale, sameRatingSet } from "./lib/syncMerge";
 import { CATEGORIES, fmt, numOrNull, annotateThumbs, Lightbox, THUMB_SIZE_KEY, THUMB_SIZE_DEFAULT } from "./components/shared";
 import { useLayoutMode } from "./hooks/useMediaQuery";
 import DesktopShell from "./components/DesktopShell";
@@ -47,7 +47,7 @@ const ANALYTICS_IGNORE_KEY = "temu-analytics-ignore-v1";
 const ADMIN_EMAIL = import.meta.env.VITE_ADMIN_EMAIL || null;
 
 export default function App() {
-  const [data, setData] = useState({ orders: [], processedIds: [], lastSync: null, autoSync: true });
+  const [data, setData] = useState({ orders: [], processedIds: [], lastSync: null, autoSync: true, ratings: {} });
   const [loaded, setLoaded] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [log, setLog] = useState([]);
@@ -173,11 +173,15 @@ export default function App() {
       const parsed = JSON.parse(val.json);
       const localNow = dataRef.current || {};
       const merged = mergeState(localNow, parsed);
-      if (sameOrderSet(merged.orders, localNow.orders || [])) return; // our own echo, or nothing new
+      // Both fingerprints must agree nothing changed — a ratings-only
+      // remote edit leaves merged.orders identical to localNow.orders, so
+      // checking orders alone would silently drop it (see lib/syncMerge.js
+      // "Ratings merge" header).
+      if (sameOrderSet(merged.orders, localNow.orders || []) && sameRatingSet(merged.ratings, localNow.ratings || {})) return; // our own echo, or nothing new
       dataRef.current = merged; // synchronous, so callbacks never see pre-merge state
       setData(merged);
       storage.set(STORAGE_KEY, JSON.stringify(merged)).catch(() => {});
-      if (remoteIsStale(merged.orders, parsed.orders)) {
+      if (remoteIsStale(merged.orders, parsed.orders) || remoteRatingsStale(merged.ratings, parsed.ratings)) {
         cloudSet(JSON.stringify(merged), merged.updatedAt).catch(() => {});
       }
       pushLog(note, "ok");
@@ -215,10 +219,10 @@ export default function App() {
           dataRef.current = merged; // before setData: await-ers read the merged state immediately
           setData(merged);
           storage.set(STORAGE_KEY, JSON.stringify(merged)).catch(() => {});
-          if (remoteIsStale(merged.orders, parsed.orders)) {
+          if (remoteIsStale(merged.orders, parsed.orders) || remoteRatingsStale(merged.ratings, parsed.ratings)) {
             // Remote was missing something local had, or had an older copy
-            // of some order — push the merged truth back so both sides
-            // converge instead of staying split.
+            // of some order/rating — push the merged truth back so both
+            // sides converge instead of staying split.
             await cloudSet(JSON.stringify(merged), merged.updatedAt).catch(() => {});
           }
           pushLog(`Cloud: merged with Firebase (${merged.orders.length} order(s) total).`, "ok");
@@ -400,6 +404,7 @@ export default function App() {
           processedIds: parsed.processedIds || [],
           lastSync: parsed.lastSync || null,
           autoSync: parsed.autoSync ?? true,
+          ratings: parsed.ratings || {},
         });
         pushLog(`Imported ${parsed.orders?.length || 0} order(s).`, "ok");
       } catch (e) {
@@ -481,6 +486,42 @@ export default function App() {
     });
     save({ ...cur, orders });
     pushLog(`Saved item edit in ${orderId}.`, "ok");
+  }, [data, save, syncing]);
+
+  /* ----- item ratings ("Rate items" tab) -----
+     Unlike updateItem, these mutate a SIBLING top-level key (data.ratings)
+     rather than anything inside cur.orders — no order object is touched,
+     so there's no order-level updatedAt to stamp and no manualEdit flag to
+     set (see lib/syncMerge.js's "Ratings merge" header for why ratings
+     merge independently of orders). Clearing a thumb writes verdict:null
+     rather than deleting the map key — see lib/derive.js's ratingQueues
+     header for why the key must never be removed. */
+  const rateItem = useCallback((orderId, itemIdx, verdict) => {
+    if (syncing) { pushLog("Can't rate items while a sync is running.", "warn"); return; }
+    const cur = dataRef.current || data; // dataRef, not the render closure — see save()
+    const key = analyticsItemKey({ orderId, itemIdx });
+    const existing = cur.ratings?.[key];
+    // Tap the active thumb again → clears; tap the opposite thumb → switches
+    // directly to the new verdict in one tap.
+    const nextVerdict = existing?.verdict === verdict ? null : verdict;
+    const nextRating = {
+      verdict: nextVerdict,
+      // Buy-again requires a "liked" verdict — switching away from "up"
+      // (or clearing it) auto-clears buyAgain in the same write so section
+      // 3 never silently retains a stale entry.
+      buyAgain: nextVerdict === "up" ? !!existing?.buyAgain : false,
+      ratedAt: Date.now(),
+    };
+    save({ ...cur, ratings: { ...(cur.ratings || {}), [key]: nextRating } });
+  }, [data, save, syncing]);
+
+  const toggleBuyAgain = useCallback((orderId, itemIdx) => {
+    if (syncing) { pushLog("Can't rate items while a sync is running.", "warn"); return; }
+    const cur = dataRef.current || data; // dataRef, not the render closure — see save()
+    const key = analyticsItemKey({ orderId, itemIdx });
+    const existing = cur.ratings?.[key];
+    if (existing?.verdict !== "up") return; // buy-again gated on "liked" — see rateItem above
+    save({ ...cur, ratings: { ...(cur.ratings || {}), [key]: { ...existing, buyAgain: !existing.buyAgain, ratedAt: Date.now() } } });
   }, [data, save, syncing]);
 
   const deleteOrder = useCallback((id) => {
@@ -750,7 +791,15 @@ export default function App() {
         orderId: /^PO-/.test(order.id) ? order.id : null,
         date: order.date,
       };
+      // Re-read replaces this order's items[] wholesale from a fresh vision
+      // parse — capture before/after so any ratings on this order can be
+      // carried forward by name match instead of silently orphaned (see
+      // lib/derive.js's remapRatingsAfterReplace and CLAUDE.md's survival
+      // matrix).
+      const oldItems = working.orders.find((o) => o.id === order.id)?.items || [];
       await processOrderEmail(em, token, working, { forceId: order.id });
+      const newItems = working.orders.find((o) => o.id === order.id)?.items || [];
+      working.ratings = remapRatingsAfterReplace(working.ratings, order.id, oldItems, newItems);
       await save({ ...working });
       pushLog("Re-read complete.", "ok");
     } catch (e) {
@@ -908,7 +957,13 @@ export default function App() {
         return;
       }
       const cur = dataRef.current || data; // dataRef, not the render closure — see save()
-      await save({ ...cur, orders: cur.orders.map((o) => (o.id === orderId ? fixed : o)) });
+      // Same wholesale items[] replacement as rereadOrder — carry ratings
+      // forward by name match (see lib/derive.js's remapRatingsAfterReplace).
+      // Old items come from cur, not the `order` closure captured before the
+      // vision call — an edit landing mid-call would make that copy stale.
+      const oldItems = cur.orders.find((o) => o.id === orderId)?.items || order.items || [];
+      const ratings = remapRatingsAfterReplace(cur.ratings, orderId, oldItems, fixed.items || []);
+      await save({ ...cur, orders: cur.orders.map((o) => (o.id === orderId ? fixed : o)), ratings });
       pushLog(`✓ ${orderId}: replaced estimated prices with real ones from its status email.`, "ok");
     } catch (e) {
       pushLog("Price fix failed: " + e.message, "error");
@@ -956,7 +1011,13 @@ export default function App() {
             skippedCount++;
             continue;
           }
-          working = { ...working, orders: working.orders.map((o) => (o.id === id ? fixed : o)) };
+          working = {
+            ...working,
+            orders: working.orders.map((o) => (o.id === id ? fixed : o)),
+            // Same wholesale items[] replacement per order — carry that
+            // order's ratings forward by name match.
+            ratings: remapRatingsAfterReplace(working.ratings, id, order.items || [], fixed.items || []),
+          };
           await save(working);
           fixedCount++;
         } catch (e) {
@@ -1031,6 +1092,14 @@ export default function App() {
       const working = full
         ? { ...base, orders: [], processedIds: [] }
         : { ...base, orders: [...(base.orders || [])], processedIds: [...(base.processedIds || [])] };
+      // Full re-sync rebuilds every order from fresh vision parses — the
+      // same wholesale items[] replacement rereadOrder does, for every
+      // order at once. Snapshot the outgoing items so ratings can be
+      // re-keyed against the rebuilt arrays once the rebuild lands (the
+      // remap pass after the order loop below); without this, old
+      // orderId:itemIdx rating keys ride through the wipe and can attach
+      // to the wrong item if a re-parse orders items differently.
+      const preWipeItems = full ? new Map((base.orders || []).map((o) => [o.id, o.items || []])) : null;
 
       /* 1 — find Temu emails. Normal incremental syncs only search since the
          last successful sync (fast). A full re-sync, first-ever sync, or an
@@ -1130,6 +1199,18 @@ export default function App() {
         const em = newOrders[i];
         pushLog(`Reading order email ${i + 1}/${newOrders.length}…`);
         await processOrderEmail(em, token, working);
+        await save({ ...working });
+      }
+      if (preWipeItems) {
+        // Re-key each rebuilt order's ratings against its freshly-parsed
+        // items (drop-don't-misattach — see remapRatingsAfterReplace).
+        // Ratings for orders that didn't come back sit in the map
+        // harmlessly (keys are never deleted, and ratingQueues only reads
+        // keys whose order/item exist).
+        for (const [oid, oldItems] of preWipeItems) {
+          const rebuilt = working.orders.find((o) => o.id === oid);
+          if (rebuilt) working.ratings = remapRatingsAfterReplace(working.ratings, oid, oldItems, rebuilt.items || []);
+        }
         await save({ ...working });
       }
 
@@ -1310,6 +1391,10 @@ export default function App() {
   // ignored item disappears from this list too, not just the item-driven
   // stats above.
   const receivedFreeItems = useMemo(() => freeItems(analyticsItems), [analyticsItems]);
+  const ratingQueuesData = useMemo(
+    () => ratingQueues(data.orders, data.ratings || {}, carrier),
+    [data.orders, data.ratings, carrier]
+  );
 
   /* ----- ctx: everything the shells need ----- */
   const ctx = {
@@ -1327,6 +1412,7 @@ export default function App() {
     query, setQuery,
     allItems, activeOrders, activeItems, stats, review, inTransit,
     ignoredAnalyticsItems, toggleIgnoreAnalyticsItem, receivedFreeItems,
+    ratings: data.ratings || {}, rateItem, toggleBuyAgain, ratingQueues: ratingQueuesData,
     lightbox, setLightbox,
     layoutOverride, setLayoutOverride,
     cloudState, carrier,

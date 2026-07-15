@@ -42,7 +42,7 @@ export default function SettingsPanel({ c, dark = true }) {
           onClick={async () => {
             if (confirm(
               "Clear ALL stored orders?\n\nWith cloud sync on, the empty state also pushes to Firebase — your other devices will sync to empty too. Consider Export JSON first."
-            )) await c.save({ orders: [], processedIds: [], lastSync: null, autoSync: c.data.autoSync });
+            )) await c.save({ orders: [], processedIds: [], lastSync: null, autoSync: c.data.autoSync, ratings: {} });
           }}
           className={link(dark ? "text-red-400 hover:text-red-300" : "text-red-600 hover:text-red-500")}>
           Clear all data
