@@ -4,8 +4,8 @@ import { storage } from "./lib/storage";
 import { downloadCsv, itemsCsv, ordersCsv } from "./lib/exportCsv";
 import { applyDiscounts } from "./lib/discounts";
 import { callClaude, cancelCurrentCall, textOf, extractJSON, getApiKey, setApiKey, recordUsage, estimateCostPerCall } from "./lib/anthropic";
-import { getToken, getStoredToken, isSignedIn, signIn, signOut } from "./lib/gis";
-import { cloudConfigured, cloudSignIn, cloudSignOut, cloudGet, cloudSet, cloudSubscribe, cloudSubscribeCarrier, cloudClockSkew, cloudListDirectory, cloudGetUserState } from "./lib/firebase";
+import { getToken, getStoredToken, isSignedIn, hasConsented, signIn, signOut } from "./lib/gis";
+import { cloudConfigured, cloudSignIn, cloudSignOut, cloudRestore, cloudGet, cloudSet, cloudSubscribe, cloudSubscribeCarrier, cloudClockSkew, cloudListDirectory, cloudGetUserState } from "./lib/firebase";
 import {
   searchMessages, getMessageMetadata, getMessageFull, headerValue,
   extractHtml, extractSection, extractAllSections, extractImgSrcs, extractPoNumber, extractSubOrders,
@@ -71,6 +71,7 @@ export default function App() {
      "unconfigured" = no VITE_FIREBASE_* env vars, feature invisible.
      "off" → "connecting" → "on" | "error" once configured. */
   const [cloudState, setCloudState] = useState(() => (cloudConfigured() ? "off" : "unconfigured"));
+  const [cloudDirty, setCloudDirty] = useState(false); // a save landed while cloud sync wasn't connected — local-only until reconnect
   const [carrier, setCarrier] = useState({}); // trackingNumber → live 17TRACK info (from the GitHub Action)
   const [cloudEmail, setCloudEmail] = useState(null); // signed-in Firebase user's email, once connected
 
@@ -161,7 +162,23 @@ export default function App() {
     try { await storage.set(STORAGE_KEY, json); }
     catch (e) { pushLog("Save failed: " + e.message, "error"); }
     if (cloudReadyRef.current) {
-      cloudSet(json, stamped.updatedAt).catch((e) => pushLog("Cloud save failed (kept locally): " + e.message, "warn"));
+      cloudSet(json, stamped.updatedAt)
+        .then(() => setCloudDirty(false))
+        .catch((e) => {
+          // The change is safe locally but did NOT reach Firebase — that's
+          // a visible problem now (CloudBanner), not just a log line the
+          // user finds a week later when their phone shows stale data.
+          setCloudDirty(true);
+          setCloudState("error");
+          pushLog("Cloud save FAILED — this change is on this device only until sync reconnects: " + e.message, "error");
+        });
+    } else if (cloudConfigured()) {
+      // Cloud sync is configured but not connected (signed out, session
+      // expired, or an earlier error). The save persists locally, but the
+      // user needs to know it isn't syncing — CloudBanner keys off
+      // cloudDirty for exactly this moment.
+      setCloudDirty(true);
+      pushLog("Saved on this device only — cloud sync isn't connected. Use the banner or Settings → Google to reconnect.", "warn");
     }
   }, []);
 
@@ -196,13 +213,25 @@ export default function App() {
      would push a pre-merge snapshot over both local state and the cloud
      blob, wiping edits that so far existed only in the cloud copy. */
   const connectCloud = useCallback((token) => {
-    if (!cloudConfigured() || !token) return Promise.resolve();
+    if (!cloudConfigured()) return Promise.resolve();
     if (cloudConnectRef.current) return cloudConnectRef.current;
     const connecting = (async () => {
       setCloudState("connecting");
       try {
-        const { email } = await cloudSignIn(token);
-        setCloudEmail(email);
+        // With a Google token, sign in fresh; without one, fall back to
+        // the Firebase session persisted from a previous visit — Firebase
+        // keeps its own long-lived refresh token, so cloud sync shouldn't
+        // die just because the ~1h Gmail token did (it used to: saves went
+        // silently local-only every time the app was reopened after an
+        // hour away).
+        const session = token ? await cloudSignIn(token) : await cloudRestore();
+        if (!session) {
+          // No token AND nothing persisted — genuinely signed out.
+          cloudConnectRef.current = null; // a later sign-in retries
+          setCloudState("off");
+          return;
+        }
+        setCloudEmail(session.email);
         const remote = await cloudGet();
         const local = dataRef.current || {};
         if (remote?.json) {
@@ -258,6 +287,9 @@ export default function App() {
         } catch { /* best-effort */ }
         cloudReadyRef.current = true;
         setCloudState("on");
+        // Connect just merged with the cloud and (if local had anything
+        // newer) pushed the merged truth back — nothing is pending anymore.
+        setCloudDirty(false);
       } catch (e) {
         cloudConnectRef.current = null; // allow retry on next token
         setCloudState("error");
@@ -278,11 +310,43 @@ export default function App() {
     applyRemote(val, "Cloud: merged the update that arrived mid-sync.");
   }, [syncing, applyRemote]);
 
-  /* If already signed in from a previous session, connect cloud on open. */
+  /* On open: refresh the Google token silently if possible (no popup —
+     works whenever the browser's Google session is alive and consent was
+     granted before), then connect cloud. connectCloud(null) still restores
+     the persisted Firebase session, so an expired Gmail token no longer
+     silently disables cloud sync until the next manual sign-in. */
   useEffect(() => {
-    if (loaded && isSignedIn()) connectCloud(getStoredToken());
+    if (!loaded) return;
+    (async () => {
+      let token = getStoredToken();
+      if (!token && hasConsented()) {
+        try {
+          token = await signIn({ silent: true });
+          pushLog("Google session refreshed silently.", "ok");
+        } catch { /* blocked or session gone — cloud still restores below */ }
+      }
+      setGoogleSignedIn(isSignedIn());
+      connectCloud(token);
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded]);
+
+  /* Keep the signed-in indicator honest and the token fresh. The Gmail
+     token dies after ~1h and nothing used to notice — the sidebar dot
+     stayed green and the next action just popped a consent screen. Every
+     minute: reflect the real state; when expired, attempt one silent
+     refresh per 10 minutes (no UI, fails quietly). */
+  useEffect(() => {
+    let lastSilent = 0;
+    const id = setInterval(async () => {
+      if (!isSignedIn() && hasConsented() && Date.now() - lastSilent > 10 * 60e3) {
+        lastSilent = Date.now();
+        try { await signIn({ silent: true }); } catch { /* needs interaction */ }
+      }
+      setGoogleSignedIn(isSignedIn());
+    }, 60e3);
+    return () => clearInterval(id);
+  }, []);
 
   /* Carrier truth → order status. When the tracking worker reports a
      package Delivered but the order still says "shipped" (Temu's delivered
@@ -314,6 +378,14 @@ export default function App() {
       const token = await signIn({ interactive: true });
       setGoogleSignedIn(true);
       pushLog("Signed in to Google.", "ok");
+      // A previous connect may exist in a broken state (e.g. cloudSet
+      // failures flipped cloudState to "error" while the settled connect
+      // promise is still cached) — tear it down so connectCloud rebuilds
+      // cleanly instead of returning the stale promise and doing nothing.
+      if (cloudUnsubRef.current) { try { cloudUnsubRef.current(); } catch { /* noop */ } cloudUnsubRef.current = null; }
+      if (cloudCarrierUnsubRef.current) { try { cloudCarrierUnsubRef.current(); } catch { /* noop */ } cloudCarrierUnsubRef.current = null; }
+      cloudReadyRef.current = false;
+      cloudConnectRef.current = null;
       connectCloud(token);
     } catch (e) {
       pushLog("Google sign-in failed: " + e.message, "error");
@@ -1415,7 +1487,7 @@ export default function App() {
     ratings: data.ratings || {}, rateItem, toggleBuyAgain, ratingQueues: ratingQueuesData,
     lightbox, setLightbox,
     layoutOverride, setLayoutOverride,
-    cloudState, carrier,
+    cloudState, cloudDirty, carrier,
     openWelcome,
     isAdmin, directory, directoryError, loadDirectory,
     adminViewUid, adminViewState, adminViewLoading, viewUserData, exitAdminView,

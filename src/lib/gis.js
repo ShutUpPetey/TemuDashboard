@@ -7,6 +7,10 @@
 
 const TOKEN_KEY = "temu-gmail-token";
 const TOKEN_EXP_KEY = "temu-gmail-token-exp";
+// Set after the FIRST successful token grant. Google only needs the full
+// consent screen once per account+client; every later refresh can use
+// prompt:"" (no UI at all while the browser's Google session is alive).
+const CONSENT_KEY = "temu-gmail-consented";
 // gmail.readonly = the app's core function; openid/email/profile let the
 // same access token also sign into Firebase (cloud sync) — no second login.
 // Adding scopes re-prompts Google consent once for existing sign-ins.
@@ -54,12 +58,20 @@ export function isSignedIn() {
   return !!getStoredToken();
 }
 
+export function hasConsented() {
+  return !!localStorage.getItem(CONSENT_KEY);
+}
+
 let tokenClient = null;
 
-// Must be called from a user gesture (button click) the first time, since it
-// opens a Google consent popup. Once a token is cached, subsequent calls can
-// silently refresh without a visible popup as long as the browser allows it.
-export async function signIn({ interactive = true } = {}) {
+// Must be called from a user gesture (button click) the FIRST time — the
+// initial grant opens Google's consent popup. After that, prompt:"" lets
+// Google refresh with no visible UI while the browser's Google session is
+// alive. `silent: true` is the no-gesture variant (page load, timers): if
+// Google can't refresh invisibly it tries to open a popup, which the
+// browser blocks without a gesture → error_callback fires → we reject
+// quietly instead of half-opening UI at a random moment.
+export async function signIn({ interactive = true, silent = false } = {}) {
   const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
   if (!clientId) {
     throw new Error(
@@ -68,22 +80,32 @@ export async function signIn({ interactive = true } = {}) {
   }
   const google = await loadGis();
   return new Promise((resolve, reject) => {
+    // Belt and braces for silent mode: if neither callback ever fires
+    // (seen with some third-party-cookie configurations), don't leave the
+    // caller hanging forever.
+    let timer = silent ? setTimeout(() => reject(new Error("Silent sign-in timed out")), 15000) : null;
+    const settle = (fn) => (arg) => { if (timer) { clearTimeout(timer); timer = null; } fn(arg); };
     tokenClient = google.accounts.oauth2.initTokenClient({
       client_id: clientId,
       scope: SCOPE,
-      callback: (resp) => {
+      callback: settle((resp) => {
         if (resp.error) {
           reject(new Error(`Google sign-in failed: ${resp.error}`));
           return;
         }
+        localStorage.setItem(CONSENT_KEY, "1");
         storeToken(resp.access_token, resp.expires_in || 3600);
         resolve(resp.access_token);
-      },
-      error_callback: (err) => {
+      }),
+      error_callback: settle((err) => {
         reject(new Error(`Google sign-in failed: ${err?.type || "unknown error"}`));
-      },
+      }),
     });
-    tokenClient.requestAccessToken({ prompt: interactive ? "consent" : "" });
+    // prompt "" = let Google decide (usually NO UI at all once consent
+    // exists). The old hardcoded "consent" forced the full consent screen
+    // on every hourly token expiry — the "I have to re-login constantly"
+    // complaint. Only force it before the very first grant.
+    tokenClient.requestAccessToken({ prompt: silent || hasConsented() ? "" : "consent" });
   });
 }
 
@@ -92,12 +114,20 @@ export function signOut() {
 }
 
 // Returns a valid token, prompting an interactive sign-in only if necessary
-// and allowed (see `interactive`). Throws if a token is needed but the caller
-// disallowed the interactive popup (e.g. an automatic background sync).
+// and allowed (see `interactive`). Non-interactive callers (auto-sync on
+// open, timers) get one silent-refresh attempt before giving up — with a
+// live Google session that succeeds invisibly, so an expired token no
+// longer kills background syncs. Interactive callers go straight to
+// signIn: post-consent it uses prompt:"" anyway (Google shows UI only if
+// it actually needs to), and attempting a silent pass first would burn the
+// click's user-gesture, getting the fallback popup blocked.
 export async function getToken({ interactive = true } = {}) {
   const existing = getStoredToken();
   if (existing) return existing;
   if (!interactive) {
+    if (hasConsented()) {
+      try { return await signIn({ silent: true }); } catch { /* needs real UI */ }
+    }
     throw new Error("Not signed in to Google — click “Check Gmail” to sign in.");
   }
   return signIn({ interactive: true });

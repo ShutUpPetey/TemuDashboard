@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Clock, Truck, CheckCircle2, XCircle, Undo2, Package, X, ThumbsUp, ThumbsDown, Repeat } from "lucide-react";
+import { Clock, Truck, CheckCircle2, XCircle, Undo2, Package, X, ThumbsUp, ThumbsDown, Repeat, CloudOff } from "lucide-react";
 
 export { isActiveStatus, annotateThumbs } from "../lib/derive";
 
@@ -127,6 +127,36 @@ export function Empty({ syncing, loaded = true }) {
       <Package size={36} className={`mx-auto mb-3 ${syncing ? "text-orange-400 animate-pulse" : "text-stone-300"}`} />
       <div className="disp font-bold text-stone-500">No orders yet</div>
       <div className="text-sm mt-1">{syncing ? "Sync in progress — orders appear as they're read." : "Hit “Check Gmail” to pull in your Temu order emails."}</div>
+    </div>
+  );
+}
+
+/* Amber strip both shells render when cloud sync is configured but not
+   actually syncing: an outright error, or a change was saved while
+   disconnected (c.cloudDirty). Deliberately NOT shown for a merely
+   signed-out state with nothing pending — someone deliberately offline
+   isn't nagged — but the moment an edit goes local-only it appears and
+   stays until sync reconnects (connectCloud clears cloudDirty after its
+   merge+push). This is the "your changes aren't saving to the cloud"
+   indicator that used to be one warn line in the log. */
+export function CloudBanner({ c, className = "" }) {
+  const s = c.cloudState;
+  const show = s === "error" || ((s === "off" || s === "connecting") && c.cloudDirty);
+  if (!show) return null;
+  return (
+    <div className={`flex items-center gap-2.5 bg-amber-50 border border-amber-300 text-amber-800 rounded-lg px-3 py-2 text-[12.5px] ${className}`}>
+      <CloudOff size={15} className="shrink-0 text-amber-500" />
+      <span className="flex-1 leading-snug">
+        <b>{s === "error" ? "Cloud sync error" : "Cloud sync is disconnected"}</b>
+        {" — "}
+        {c.cloudDirty
+          ? "recent changes are saved on THIS device only; they'll sync automatically once reconnected."
+          : "changes will save on this device only."}
+      </span>
+      <button onClick={c.handleGoogleSignIn}
+        className="shrink-0 font-bold underline underline-offset-2 hover:text-amber-950">
+        Reconnect
+      </button>
     </div>
   );
 }

@@ -89,6 +89,28 @@ export function currentUser() {
   return { uid, email };
 }
 
+/* Try restoring the persisted Firebase session — the Firebase SDK keeps
+   its own long-lived refresh token in browser storage, entirely separate
+   from the ~1h Google access token used for Gmail. Resolves { uid, email }
+   or null if nothing is persisted. This is what lets cloud sync reconnect
+   on page load long after the Gmail token expired, instead of silently
+   degrading to local-only saves. */
+export async function cloudRestore() {
+  if (!cloudConfigured()) return null;
+  const { app, authMod } = await fb();
+  const auth = authMod.getAuth(app);
+  // onAuthStateChanged fires once the SDK finishes loading the persisted
+  // session (or immediately with null if there isn't one).
+  const user = await new Promise((resolve) => {
+    const unsub = authMod.onAuthStateChanged(auth, (u) => { unsub(); resolve(u); });
+  });
+  if (!user) return null;
+  uid = user.uid;
+  email = user.email || null;
+  writeDirectoryEntry().catch(() => { /* best-effort; see cloudSignIn */ });
+  return { uid, email };
+}
+
 export async function cloudSignOut() {
   uid = null;
   email = null;

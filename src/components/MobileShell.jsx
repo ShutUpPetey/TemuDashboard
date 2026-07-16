@@ -4,7 +4,7 @@ import {
   LayoutGrid, RotateCcw, AlertTriangle, ExternalLink, CalendarDays, ShieldCheck, ThumbsUp,
 } from "lucide-react";
 import {
-  CATEGORIES, fmt, pct, isActiveStatus, StatusChip, CropThumb, annotateThumbs, Elapsed, Empty, LogPanel,
+  CATEGORIES, fmt, pct, isActiveStatus, StatusChip, CropThumb, annotateThumbs, Elapsed, Empty, LogPanel, CloudBanner,
   carrierInfoFor, carrierEtaText,
 } from "./shared";
 import { siblingOrders, matchesQuery, itemSearchIndex, orderSearchIndex, arrivingCalendar, analyticsItemKey } from "../lib/derive";
@@ -178,6 +178,8 @@ export default function MobileShell({ c }) {
           </div>
         )}
       </header>
+
+      <CloudBanner c={c} className="mx-4 mt-3" />
 
       {/* ---------- Views ---------- */}
       {view === "items" && (

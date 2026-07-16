@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import {
   CATEGORIES, STATUS_META, fmt, pct, isActiveStatus,
-  StatusChip, CropThumb, annotateThumbs, Elapsed, Empty, LogPanel,
+  StatusChip, CropThumb, annotateThumbs, Elapsed, Empty, LogPanel, CloudBanner,
   carrierInfoFor, carrierEtaText, CARRIER_STATUS_LABEL,
 } from "./shared";
 import { sparkPoints, monthDelta, siblingOrders, matchesQuery, itemSearchIndex, orderSearchIndex, arrivingCalendar, analyticsItemKey } from "../lib/derive";
@@ -208,6 +208,7 @@ export default function DesktopShell({ c }) {
             </div>
           </div>
 
+          <CloudBanner c={c} className="mb-4" />
           <LogPanel log={c.log} className="mb-4" />
 
           {view === "overview" && <Overview c={c} delta={delta} reviewCount={reviewCount} goView={setView} goOrder={openOrder} />}

@@ -211,6 +211,23 @@ Firebase sign-in.
   (still priceless) split confirmation.
 - **Carrier → status promotion**: an effect in App.jsx auto-flips shipped →
   delivered when carrier data says Delivered.
+- **Auth persistence & the local-only banner (2026-07-16)**: the Gmail
+  token (GIS implicit flow) lives ~1h and can't be extended — but it CAN
+  be refreshed with no UI via `prompt:""` once consent exists, so
+  `gis.js` now only forces the `consent` screen before the FIRST grant
+  (`temu-gmail-consented` marker); `getToken({interactive:false})` and an
+  on-open + every-10-min-when-expired silent refresh keep it alive while
+  the browser's Google session lasts. Separately, cloud sync no longer
+  depends on that token at all after the first sign-in: Firebase persists
+  its own long-lived session, and `connectCloud(null)` restores it via
+  `cloudRestore()` (`firebase.js`) on every open. When a save happens
+  while cloud is configured-but-disconnected (or `cloudSet` fails),
+  `cloudDirty` flips and BOTH shells show `CloudBanner` (`shared.jsx`):
+  "changes saved on THIS device only" + a Reconnect button
+  (`handleGoogleSignIn`, which tears down any broken connect state so the
+  retry actually reconnects). `cloudDirty` clears on any successful
+  cloudSet or connect-merge. A 60s interval also keeps the sidebar's
+  signed-in dot honest instead of green-forever.
 - **Per-order cloud sync merge (`lib/syncMerge.js`)**: cloud sync used to
   treat the whole app state as one JSON blob with "newest top-level
   `updatedAt` wins" — a stale device making ANY save (even an unrelated

@@ -67,7 +67,7 @@ export default function SettingsPanel({ c, dark = true }) {
         {c.cloudState === "unconfigured" && (
           <span className={`${label} text-xs`}>Not set up — add the VITE_FIREBASE_* values to .env (see README → Cloud sync) to share data across devices.</span>
         )}
-        {c.cloudState === "off" && <span className={`${label} text-xs`}>Configured — connects when you sign in to Google.</span>}
+        {c.cloudState === "off" && <span className={`${label} text-xs`}>Configured — reconnects automatically on open; if this persists, sign in with Google above.</span>}
         {c.cloudState === "connecting" && <span className="text-amber-500 text-xs">Connecting…</span>}
         {c.cloudState === "on" && <span className="text-emerald-500 text-xs">● Live — this device syncs through Firebase</span>}
         {c.cloudState === "error" && <span className="text-red-400 text-xs">Connection failed — data stays local. See the sync log and README → Cloud sync.</span>}
