@@ -204,6 +204,27 @@ Ship24/17TRACK (`SHIP24_KEY`/`SEVENTEEN_TRACK_KEY`, tight quotas). Adapters
 fall through in that order — whichever produces a result first wins, so
 partial credentials never break a run.
 
+## Phone app (PWA), push notifications & background sync (optional)
+
+The site is an installable PWA: open it in Chrome (Android) or Safari (iOS)
+and use **Install app** / **Add to Home Screen** to get a full-screen,
+home-screen app. Two optional server-side features make it feel native:
+
+- **Push notifications** — a Settings toggle registers this device for
+  pushes ("package delivered", "N new orders parsed"), sent by the GitHub
+  Action workers via Firebase Cloud Messaging. Setup (two repo Variables
+  from the Firebase console): see **[docs/phone-app-setup.md](docs/phone-app-setup.md)**.
+- **Background Gmail sync** — a scheduled Action
+  (`.github/workflows/gmail-sync.yml` → `scripts/gmail-sync.mjs`) runs the
+  same incremental email sync the app does, server-side every ~5–20 minutes,
+  so the app opens already up-to-date and notifications arrive with the
+  phone in your pocket. Needs a one-time Gmail refresh-token grant
+  (`scripts/gmail-auth.mjs`) plus five repo Secrets: see
+  **[docs/background-sync-setup.md](docs/background-sync-setup.md)**.
+
+Both features degrade silently when unconfigured — the app works exactly as
+before without them.
+
 ## Data & backups
 
 All order data lives in this browser's **IndexedDB** — nothing is synced to a

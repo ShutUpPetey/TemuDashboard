@@ -22,6 +22,7 @@
    ============================================================ */
 
 import admin from "firebase-admin";
+import { sendPushes } from "./push.mjs";
 
 const DB_URL = process.env.FIREBASE_DATABASE_URL;
 const SA_JSON = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -369,6 +370,12 @@ for (const [uid, node] of Object.entries(root.val() || {})) {
   }
   console.log(`${uid}: polling ${jobs.length} tracking number(s)…`);
 
+  // Delivery pushes: collected per uid during the poll loop, sent once at
+  // the end. Only a real status TRANSITION notifies (the previous stored
+  // record's status differs from the fresh one) — re-polling a package
+  // that's still OutForDelivery/Delivered stays silent.
+  const pushMsgs = [];
+
   for (const { number, carrier } of jobs) {
     try {
       // Adapter fall-through: first one that produces a record wins. Each
@@ -386,10 +393,32 @@ for (const [uid, node] of Object.entries(root.val() || {})) {
       if (!rec && carrier === "USPS" && USPS_ID && USPS_SECRET) rec = await attempt("USPS", () => trackUsps(number));
       if (!rec && SHIP24_KEY) rec = await attempt("Ship24", () => trackShip24(number, carrierNode[number] || {}, ship24Budget));
       if (!rec) { console.log(`  ${number}: no adapter result (${carrier || "unknown carrier"}) — skipped`); continue; }
+      // Capture the PREVIOUS status before overwriting the record — the
+      // transition (prev → new) is what gates the push below.
+      const prevStatus = carrierNode[number]?.status || null;
       await db.ref(`manifest/${uid}/carrier/${number}`).update({ registered: true, ...rec, checkedAt: Date.now() });
       console.log(`  ${number} (${rec.provider}): ${rec.status} eta=${rec.etaFrom || "?"}`);
+      if ((rec.status === "Delivered" || rec.status === "OutForDelivery") && prevStatus !== rec.status) {
+        // Item name is cheaply available from the already-parsed orders —
+        // "Solar Garden Lights (1Z…)" beats a bare tracking number.
+        const order = orders.find((o) => o.tracking?.number === number);
+        const item = order?.items?.[0]?.name || null;
+        pushMsgs.push({
+          title: rec.status === "Delivered" ? "Package delivered" : "Package out for delivery",
+          body: item ? `${item} (${number})` : `Tracking ${number}`,
+          tag: `temu-carrier-${number}`,
+          url: "https://shutuppetey.github.io/TemuDashboard/",
+        });
+      }
     } catch (e) {
       console.warn(`  ${number}: ${e.message}`);
+    }
+  }
+
+  if (pushMsgs.length) {
+    const r = await sendPushes(admin, db, uid, pushMsgs);
+    if (r.sent || r.failed || r.pruned) {
+      console.log(`${uid}: push — ${r.sent} sent${r.failed ? `, ${r.failed} failed` : ""}${r.pruned ? `, ${r.pruned} dead token(s) pruned` : ""}`);
     }
   }
 }
