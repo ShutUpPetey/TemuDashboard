@@ -527,6 +527,15 @@ its local side, so app saves may drop the cloud copy).
 
 ## Conventions & gotchas
 
+- **Multi-client invariant (owner requirement, 2026-07-17)**: the browser
+  webapp and the phone app must BOTH stay live, first-class, and usable
+  simultaneously against the same data — permanently, including if the
+  phone side ever moves past the PWA (Capacitor/native wrapper, etc.).
+  Concretely: never fork the data model per client; every client (and every
+  server-side worker) is just "another device" against `manifest/{uid}`
+  with per-order merge semantics; a native wrapper must wrap the same
+  deployed site or at minimum speak the exact same Firebase contract; and
+  no phone-side feature may degrade or remove the desktop/browser path.
 - **User environment**: Windows, PowerShell 5.x — `&&` does NOT work; give
   commands on separate lines. User runs git pushes themselves (credentials
   shouldn't pass through the assistant).
