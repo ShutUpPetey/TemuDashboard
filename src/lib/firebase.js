@@ -42,7 +42,15 @@ const cfg = {
   databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL,
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  // Push notifications only (FCM). Optional on top of optional — without it
+  // (and the VAPID key below) cloud sync still works, the notifications
+  // toggle just shows as unavailable. See docs/phone-app-setup.md.
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
 };
+
+// FCM Web Push certificate public key (Firebase console → Cloud Messaging →
+// Web Push certificates). Public-safe, like the rest of the config.
+const VAPID_KEY = import.meta.env.VITE_FIREBASE_VAPID_KEY;
 
 export const cloudConfigured = () => !!(cfg.apiKey && cfg.databaseURL);
 
@@ -200,4 +208,175 @@ export async function cloudSubscribeCarrier(cb) {
   if (!uid) throw new Error("Cloud sync isn't signed in yet");
   const ref = dbMod.ref(dbMod.getDatabase(app), `manifest/${uid}/carrier`);
   return dbMod.onValue(ref, (snap) => cb(snap.exists() ? snap.val() : {}));
+}
+
+/* ============================================================
+   Push notifications (FCM web push).
+
+   Device tokens are registered at manifest/{uid}/push/{key} =
+   { token, ua, updatedAt } — the GitHub Action reads that map and sends
+   DATA-ONLY messages ({ data: { title, body, tag, url } }, no
+   `notification` key); src/sw.js displays them. `key` is a short hex hash
+   of the token because raw FCM tokens contain ':' — illegal in RTDB keys.
+
+   Enabling is per-DEVICE (an FCM token identifies one browser install),
+   so the "is push on here?" marker lives in localStorage, deliberately
+   NOT in the synced state blob — mirroring how the Anthropic key and
+   thumb size are per-device too.
+   ============================================================ */
+
+const PUSH_MARKER_KEY = "temu-push-v1"; // { token, key } once enabled on this device
+
+export const pushConfigured = () =>
+  cloudConfigured() && !!(cfg.messagingSenderId && VAPID_KEY);
+
+let messagingModPromise = null;
+async function messagingMod() {
+  if (!messagingModPromise) {
+    messagingModPromise = import(/* @vite-ignore */ `${CDN}/firebase-messaging.js`);
+  }
+  return messagingModPromise;
+}
+
+/* Can THIS browser do web push at all? False on iOS Safari in a normal tab
+   (Notification is undefined there until the PWA is installed to the home
+   screen, iOS 16.4+), false when unconfigured, and defers the final word to
+   firebase-messaging's own isSupported() probe. */
+export async function pushSupported() {
+  if (!pushConfigured()) return false;
+  if (typeof Notification === "undefined" || !("serviceWorker" in navigator)) return false;
+  try {
+    const m = await messagingMod();
+    return await m.isSupported();
+  } catch {
+    return false;
+  }
+}
+
+/* djb2 over the token → short hex id. Not cryptographic and doesn't need to
+   be — it only has to be a stable, RTDB-legal key that two tokens on the
+   same account won't realistically collide on. */
+function pushKey(token) {
+  let h = 5381;
+  for (let i = 0; i < token.length; i++) h = ((h * 33) ^ token.charCodeAt(i)) >>> 0;
+  return h.toString(16).padStart(8, "0");
+}
+
+function readPushMarker() {
+  try {
+    return JSON.parse(localStorage.getItem(PUSH_MARKER_KEY) || "null");
+  } catch {
+    return null;
+  }
+}
+
+/* Did the user turn push on for this device? (The toggle's persisted state —
+   whether it still WORKS is re-verified by pushRefresh on each open.) */
+export const pushLocallyEnabled = () => !!readPushMarker();
+
+/* The PWA's own service worker registration (src/sw.js, registered by
+   vite-plugin-pwa under the app's base path). FCM must be pointed at it
+   explicitly or it tries to register its own firebase-messaging-sw.js,
+   which doesn't exist here. Null when no SW is registered (dev server). */
+async function swRegistration() {
+  if (!("serviceWorker" in navigator)) return null;
+  return (await navigator.serviceWorker.getRegistration(import.meta.env.BASE_URL)) || null;
+}
+
+async function writeTokenRecord(dbMod, app, token) {
+  const key = pushKey(token);
+  await dbMod.set(dbMod.ref(dbMod.getDatabase(app), `manifest/${uid}/push/${key}`), {
+    token,
+    ua: (navigator.userAgent || "").slice(0, 160), // enough to tell devices apart in the console
+    updatedAt: Date.now(),
+  });
+  localStorage.setItem(PUSH_MARKER_KEY, JSON.stringify({ token, key }));
+  return key;
+}
+
+/* Turn push on for this device: permission prompt → FCM token bound to our
+   service worker → token record into RTDB. Must be called from a user
+   gesture (the Settings toggle) so the permission prompt isn't suppressed.
+   Requires cloud sign-in — tokens live under manifest/{uid}. */
+export async function pushEnable() {
+  if (!pushConfigured()) throw new Error("Push isn't configured (missing sender ID / VAPID key)");
+  if (!uid) throw new Error("Sign in with Google first — push tokens are stored per account");
+  const reg = await swRegistration();
+  if (!reg) throw new Error("No service worker registered — push only works in the deployed/built app");
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") throw new Error("Notification permission was " + perm);
+  const { app, dbMod } = await fb();
+  const m = await messagingMod();
+  const token = await m.getToken(m.getMessaging(app), {
+    vapidKey: VAPID_KEY,
+    serviceWorkerRegistration: reg,
+  });
+  if (!token) throw new Error("FCM returned no token");
+  await writeTokenRecord(dbMod, app, token);
+  return token;
+}
+
+/* Re-validate this device's token on app open (tokens rotate — Chrome
+   refreshes them periodically and getToken returns the current one). Also
+   bumps updatedAt so the sender can skip long-dead devices. Silently
+   disables (clears the marker) if permission was revoked in the browser
+   since — the Settings toggle then honestly shows "off". Returns the fresh
+   token, or null when push is off/unavailable. */
+export async function pushRefresh() {
+  const marker = readPushMarker();
+  if (!marker || !pushConfigured() || !uid) return null;
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") {
+    localStorage.removeItem(PUSH_MARKER_KEY);
+    return null;
+  }
+  const reg = await swRegistration();
+  if (!reg) return null; // dev server — leave the marker for the real app
+  const { app, dbMod } = await fb();
+  const m = await messagingMod();
+  const token = await m.getToken(m.getMessaging(app), {
+    vapidKey: VAPID_KEY,
+    serviceWorkerRegistration: reg,
+  });
+  if (!token) return null;
+  if (marker.token && marker.token !== token) {
+    // Rotated — drop the stale record so the sender doesn't keep hitting a
+    // dead token (FCM errors on it, but why leave garbage).
+    await dbMod
+      .remove(dbMod.ref(dbMod.getDatabase(app), `manifest/${uid}/push/${marker.key}`))
+      .catch(() => { /* best-effort */ });
+  }
+  await writeTokenRecord(dbMod, app, token);
+  return token;
+}
+
+/* Turn push off for this device: delete the FCM token (stops delivery at
+   the source) and remove the RTDB record + local marker. Best-effort all
+   the way down — a half-failed disable still leaves the marker cleared so
+   the UI is off, and a stale RTDB record just gets an FCM error when the
+   sender tries it. */
+export async function pushDisable() {
+  const marker = readPushMarker();
+  localStorage.removeItem(PUSH_MARKER_KEY);
+  if (!marker) return;
+  try {
+    const { app, dbMod } = await fb();
+    if (uid) {
+      await dbMod
+        .remove(dbMod.ref(dbMod.getDatabase(app), `manifest/${uid}/push/${marker.key}`))
+        .catch(() => { /* best-effort */ });
+    }
+    const m = await messagingMod();
+    if (await m.isSupported()) await m.deleteToken(m.getMessaging(app)).catch(() => { /* best-effort */ });
+  } catch { /* offline etc. — marker is already cleared, which is the part the UI needs */ }
+}
+
+/* Foreground pushes (app open in the tab that would get the notification):
+   the SW's push handler doesn't fire for these — FCM routes them to
+   onMessage instead. cb receives the raw payload ({ data: {...} }); App.jsx
+   just logs it to the sync log. Returns an unsubscribe function. */
+export async function pushOnForeground(cb) {
+  const { app } = await fb();
+  const m = await messagingMod();
+  if (!(await m.isSupported())) return () => {};
+  return m.onMessage(m.getMessaging(app), cb);
 }

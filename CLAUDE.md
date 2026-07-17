@@ -33,8 +33,11 @@ a D/W/M/Y stock-chart-style spend-over-time toggle, per-item "ignore from
 analytics" with a restore list, a free-items-received list, carrier
 performance, funnel, price histogram), a first-run Welcome tour, a "Rate
 items" tab (thumbs up/down + buy-again flags on delivered items — see Key
-mechanisms), and optional multi-user admin oversight (directory +
-read-only "view as user").
+mechanisms), optional multi-user admin oversight (directory +
+read-only "view as user"), and (2026-07-17) a phone-app layer: PWA
+installability, FCM push notifications, and a headless Gmail-sync GitHub
+Action running the incremental sync server-side every ~5 min (see Key
+mechanisms → "Phone app").
 
 **2026-07-10 multi-agent review:** `IMPROVEMENTS.md` (repo root) is the ranked
 issue/improvement tracker produced by parallel UI/UX, architecture, and
@@ -111,8 +114,17 @@ Key mechanisms), `lib/storage.js` (IndexedDB with localStorage migration),
 `lib/discounts.js` (proportional discount distribution — the core feature),
 `lib/syncMerge.js` (per-order cloud sync merge), `lib/exportCsv.js`.
 
-Worker: `scripts/carrier-eta.mjs` run by `.github/workflows/carrier-eta.yml`
-(cron every 6h + manual dispatch). Deploy: `.github/workflows/deploy.yml`.
+Workers: `scripts/carrier-eta.mjs` run by `.github/workflows/carrier-eta.yml`
+(cron every 6h + manual dispatch); `scripts/gmail-sync.mjs` run by
+`.github/workflows/gmail-sync.yml` (cron every 5 min + manual +
+`repository_dispatch type=gmail-sync`; green-skips until its secrets exist) —
+the headless incremental sync (see Key mechanisms); `scripts/push.mjs` —
+shared FCM send helper used by both workers; `scripts/gmail-auth.mjs` —
+one-time local loopback helper that mints the Gmail refresh token. Deploy:
+`.github/workflows/deploy.yml`. PWA: `src/sw.js` (via vite-plugin-pwa
+injectManifest — app-shell precache + push/notificationclick handlers ONLY,
+deliberately no runtime caching so Gmail/Anthropic/gstatic traffic is never
+intercepted), manifest + icons from `vite.config.js`/`public/`.
 
 ## Data model
 
@@ -157,6 +169,24 @@ Directory record (written by EVERY signed-in user, read only by admin — see
 "Admin access" in External services): `manifest/_directory/{uid}` = `{ email,
 lastSeen }`, stamped by `lib/firebase.js → cloudSignIn` on every successful
 Firebase sign-in.
+
+Push-token records (written by the app's Settings toggle, read by both
+Action workers): `manifest/{uid}/push/{key}` = `{ token, ua, updatedAt }`
+where `key` is a djb2 hex hash of the FCM token (raw tokens can contain
+RTDB-illegal key chars). Workers prune entries whose sends fail with
+registration-token-not-registered; the client removes its own entry on
+toggle-off and replaces it on token rotation. Payload contract (both
+directions of the codebase must agree): DATA-ONLY FCM messages, `data:
+{ title, body, tag, url }`, all strings, never a `notification` key —
+`src/sw.js`'s push handler renders them.
+
+`unmatchedStatus`: the app keeps this in session-only React state, but
+`gmail-sync.mjs` persists its findings as a top-level state-blob key
+(same row shape: `{id, oid, kind, date, trackingNumber}`) so they survive
+headless runs. The app does not yet hydrate its Review queue from the
+blob (harmless: the underlying emails stay un-processed, so app-side
+Reconcile still finds them; `mergeState` only carries extra keys from
+its local side, so app saves may drop the cloud copy).
 
 ## Key mechanisms (don't rediscover these)
 
@@ -211,6 +241,37 @@ Firebase sign-in.
   (still priceless) split confirmation.
 - **Carrier → status promotion**: an effect in App.jsx auto-flips shipped →
   delivered when carrier data says Delivered.
+- **Phone app: PWA + push + headless Gmail sync (2026-07-17)**: three
+  coordinated pieces. (1) PWA — vite-plugin-pwa injectManifest with
+  `src/sw.js`; the SW is deliberately THIN (shell precache + push handlers,
+  no runtime caching — IndexedDB is the offline layer, and dynamic
+  gstatic/Gmail/Anthropic requests must never be intercepted). (2) Push —
+  Settings toggle (gated on cloud sign-in + `VITE_FIREBASE_MESSAGING_SENDER_ID`
+  / `VITE_FIREBASE_VAPID_KEY`; hidden when unset) registers an FCM token to
+  `manifest/{uid}/push/{key}` (see Data model for the record + payload
+  contract); `lib/firebase.js` owns the client half (pushEnable/pushDisable/
+  pushRefresh + permission-revoked self-heal + token-rotation cleanup, local
+  marker `temu-push-v1`); both Action workers send via `scripts/push.mjs`.
+  carrier-eta pushes ONLY on a genuine status TRANSITION to Delivered /
+  OutForDelivery (compares the previous stored record before overwriting —
+  re-polls of an unchanged status stay silent). iOS requires the PWA to be
+  installed (16.4+) before Notification exists; the toggle shows an
+  install-first hint. (3) Headless sync — `scripts/gmail-sync.mjs` ports the
+  app's incremental `sync()` (NOT full/wide; imports gmail.js/discounts.js/
+  syncMerge.js directly, copies the vision prompts verbatim, model
+  claude-sonnet-5) and acts as "another device" in the per-order merge:
+  it RE-FETCHES cloud state and `mergeState()`s over it before writing.
+  Deliberate deviations from the app's semantics, each load-bearing:
+  `lastSync` is NOT advanced when the vision budget (`MAX_VISION_PER_RUN`,
+  default 20/run) truncates the run or an order email fails — there's no
+  human to press "Retry failed", so holding the window open IS the retry
+  mechanism; unmatched status emails are persisted into the state blob's
+  `unmatchedStatus` key (see Data model); no forceId/re-read path and no
+  automatic fixEstimatedPrices (both stay manual, app-only). Pushes for
+  what changed in the run: one grouped "N new orders" + one per status
+  change. Corrupt cloud state blob → exit 1 WITHOUT writing (daily backups
+  are the recovery), never bulldoze. First run with empty cloud state
+  parses history in budget-sized chunks across successive runs.
 - **Auth persistence & the local-only banner (2026-07-16)**: the Gmail
   token (GIS implicit flow) lives ~1h and can't be extended — but it CAN
   be refreshed with no UI via `prompt:""` once consent exists, so
@@ -443,18 +504,38 @@ Firebase sign-in.
   actual security boundary, this is only a UI show/hide. Unset = admin panel
   never renders for anyone (original single-user behavior).
 - **GitHub repo ShutUpPetey/TemuDashboard**. Repo **Variables** (public-safe,
-  used by both workflows): `VITE_GOOGLE_CLIENT_ID`, `VITE_FIREBASE_API_KEY`,
+  used by the workflows): `VITE_GOOGLE_CLIENT_ID`, `VITE_FIREBASE_API_KEY`,
   `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_DATABASE_URL`,
-  `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_APP_ID`, `VITE_ADMIN_EMAIL`. Repo
-  **Secrets**: `SHIPPO_KEY` (live token `shippo_live_…` — the test token errors
-  with "not a valid test tracking carrier"), `FIREBASE_SERVICE_ACCOUNT` (full
-  JSON), plus possibly leftover `SHIP24_KEY` etc. (harmless fallbacks).
+  `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_APP_ID`, `VITE_ADMIN_EMAIL`,
+  plus (push, optional — docs/phone-app-setup.md)
+  `VITE_FIREBASE_MESSAGING_SENDER_ID`, `VITE_FIREBASE_VAPID_KEY`, and
+  optionally `MAX_VISION_PER_RUN`. Repo **Secrets**: `SHIPPO_KEY` (live token
+  `shippo_live_…` — the test token errors with "not a valid test tracking
+  carrier"), `FIREBASE_SERVICE_ACCOUNT` (full JSON), plus (background sync,
+  optional — docs/background-sync-setup.md) `GMAIL_CLIENT_ID`,
+  `GMAIL_CLIENT_SECRET` (a separate "Desktop app" OAuth client in the same
+  Google Cloud project — the web client can't do the loopback flow),
+  `GMAIL_REFRESH_TOKEN` (minted by `scripts/gmail-auth.mjs`; NOTE: while the
+  OAuth consent screen stays in "Testing" mode, refresh tokens with gmail
+  scope EXPIRE AFTER ~7 DAYS — publish the consent screen to "In production"
+  (stays unverified, that's fine) for a non-expiring token), `SYNC_UID`
+  (Matt's Firebase uid), `ANTHROPIC_API_KEY` (vision parsing now also spends
+  from CI), plus possibly leftover `SHIP24_KEY` etc. (harmless fallbacks).
 - **Shippo**: free Starter plan + card; $0.01 per unique tracking number,
   polling free.
 - Pages: Settings → Pages → Source = GitHub Actions.
 
 ## Conventions & gotchas
 
+- **Multi-client invariant (owner requirement, 2026-07-17)**: the browser
+  webapp and the phone app must BOTH stay live, first-class, and usable
+  simultaneously against the same data — permanently, including if the
+  phone side ever moves past the PWA (Capacitor/native wrapper, etc.).
+  Concretely: never fork the data model per client; every client (and every
+  server-side worker) is just "another device" against `manifest/{uid}`
+  with per-order merge semantics; a native wrapper must wrap the same
+  deployed site or at minimum speak the exact same Firebase contract; and
+  no phone-side feature may degrade or remove the desktop/browser path.
 - **User environment**: Windows, PowerShell 5.x — `&&` does NOT work; give
   commands on separate lines. User runs git pushes themselves (credentials
   shouldn't pass through the assistant).

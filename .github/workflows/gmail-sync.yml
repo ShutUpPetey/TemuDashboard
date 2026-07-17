@@ -1,0 +1,73 @@
+name: Gmail background sync
+
+# Server-side incremental sync: reads new Temu emails via a Gmail refresh
+# token, vision-parses order confirmations with Claude, applies status
+# emails, merges the result into Firebase RTDB (per-order merge — safe
+# alongside devices saving mid-run) and sends FCM pushes for what changed.
+# See scripts/gmail-sync.mjs and docs/background-sync-setup.md for the
+# one-time secret setup.
+#
+# NOTE: GitHub cron is best-effort — a "*/5" schedule really fires every
+# 5–20 minutes depending on runner load. repository_dispatch is the hook
+# for the future near-realtime tier (Gmail watch → Pub/Sub → a tiny Cloud
+# Function relay that POSTs the dispatch) — see the docs' "Tier 2" section.
+
+on:
+  schedule:
+    - cron: "3-59/5 * * * *" # every 5 min, offset to avoid GH's busy :00/:05
+  workflow_dispatch: # manual "run now" from the Actions tab
+  repository_dispatch:
+    types: [gmail-sync] # near-realtime trigger (curl/Cloud Function relay)
+
+# Runs must never overlap (two concurrent syncs would race the state
+# write-back), and a run in progress should finish rather than be killed
+# by the next tick — queue instead of cancel.
+concurrency:
+  group: gmail-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Skip gracefully (green, not red) while the GMAIL_* secrets aren't
+      # configured yet, so the 5-minute cron doesn't spam failures between
+      # merging this workflow and finishing the one-time setup.
+      - name: Check configuration
+        id: config
+        env:
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+          SYNC_UID: ${{ secrets.SYNC_UID }}
+        run: |
+          if [ -z "$GMAIL_REFRESH_TOKEN" ] || [ -z "$SYNC_UID" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "GMAIL_* / SYNC_UID secrets not set yet — skipping (see docs/background-sync-setup.md)."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.config.outputs.configured == 'true'
+        run: npm install --no-save firebase-admin@^12
+
+      - if: steps.config.outputs.configured == 'true'
+        run: node scripts/gmail-sync.mjs
+        env:
+          # Secrets (Settings → Secrets and variables → Actions → Secrets):
+          GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
+          GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+          SYNC_UID: ${{ secrets.SYNC_UID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          # Reuses the existing repo Variable from the Pages deploy:
+          FIREBASE_DATABASE_URL: ${{ vars.VITE_FIREBASE_DATABASE_URL }}
+          # Spend guard: max Claude vision calls per run (leftovers wait
+          # for the next run). Override via a repo Variable if desired.
+          MAX_VISION_PER_RUN: ${{ vars.MAX_VISION_PER_RUN || 20 }}
