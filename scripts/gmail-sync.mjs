@@ -101,6 +101,40 @@ async function refreshGmailToken() {
   return j.access_token;
 }
 
+/* ---------------- Gmail watch renewal (near-realtime tier) ---------------- */
+
+/* Gmail's users.watch makes Gmail publish a Pub/Sub message on every inbox
+   change; a push subscription forwards that to the cloud/relay Cloud
+   Function, which fires the repository_dispatch that runs this workflow
+   within seconds of an email arriving (docs/near-realtime-setup.md).
+   A watch expires after 7 days and must be re-registered — there's no
+   "renew" API, you just call watch again and the new registration replaces
+   the old one (idempotent by design). Re-registering on EVERY run — no-op
+   runs included, since renewal must happen even when there's no mail —
+   keeps it alive for as long as the workflow runs at all. Deliberately
+   best-effort: an unset topic means the near-realtime tier isn't
+   configured (skip silently), and a failure only warns — the cron
+   schedule is the fallback either way, so a lapsed watch degrades
+   latency, never correctness. */
+async function renewGmailWatch(token) {
+  const topicName = process.env.GMAIL_PUBSUB_TOPIC;
+  if (!topicName) return;
+  try {
+    const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/watch", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ topicName, labelIds: ["INBOX"], labelFilterBehavior: "include" }),
+    });
+    const j = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${JSON.stringify(j || "").slice(0, 200)}`);
+    // Gmail returns expiration as epoch-ms in a string.
+    const exp = j?.expiration ? new Date(Number(j.expiration)).toISOString() : "unknown";
+    console.log(`Gmail watch renewed on ${topicName} (expires ${exp}).`);
+  } catch (e) {
+    console.warn(`Gmail watch renewal failed (${e.message}) — near-realtime dispatches may lapse in ≤7 days; the cron schedule still covers sync.`);
+  }
+}
+
 /* ---------------- Claude vision (Node) ---------------- */
 
 /* Same request shape as src/lib/anthropic.js → callClaude, minus the
@@ -597,6 +631,11 @@ async function main() {
   if (run.statusApplied || run.statusUnmatched) {
     console.log(`Status pass: ${run.statusApplied} applied, ${run.statusUnmatched} unmatched.`);
   }
+
+  /* 3.5 — renew the Gmail push watch (near-realtime tier). Before the
+     early no-op exit on purpose: renewal must happen on EVERY run that got
+     this far, mail or no mail, or the watch lapses in 7 days of quiet. */
+  await renewGmailWatch(token);
 
   /* 4 — write back, but only if something actually changed. */
   if (run.mutations === 0) {

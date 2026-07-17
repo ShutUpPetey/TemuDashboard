@@ -120,7 +120,14 @@ Workers: `scripts/carrier-eta.mjs` run by `.github/workflows/carrier-eta.yml`
 `repository_dispatch type=gmail-sync`; green-skips until its secrets exist) —
 the headless incremental sync (see Key mechanisms); `scripts/push.mjs` —
 shared FCM send helper used by both workers; `scripts/gmail-auth.mjs` —
-one-time local loopback helper that mints the Gmail refresh token. Deploy:
+one-time local loopback helper that mints the Gmail refresh token;
+`cloud/relay/` — a tiny Cloud Function (user-deployed to GCP, NOT via this
+repo's CI) that turns Gmail Pub/Sub pushes and Shippo webhooks into
+`repository_dispatch` events (`gmail-sync` / `carrier-eta`) for near-realtime
+runs — docs/near-realtime-setup.md has the full setup; both workflows keep
+their crons as the safety net, and `gmail-sync.mjs` re-registers the 7-day
+Gmail `users.watch` on every run when the `GMAIL_PUBSUB_TOPIC` repo Variable
+is set (skips silently when unset, warns-never-fails on error). Deploy:
 `.github/workflows/deploy.yml`. PWA: `src/sw.js` (via vite-plugin-pwa
 injectManifest — app-shell precache + push/notificationclick handlers ONLY,
 deliberately no runtime caching so Gmail/Anthropic/gstatic traffic is never
@@ -180,13 +187,26 @@ directions of the codebase must agree): DATA-ONLY FCM messages, `data:
 { title, body, tag, url }`, all strings, never a `notification` key —
 `src/sw.js`'s push handler renders them.
 
-`unmatchedStatus`: the app keeps this in session-only React state, but
-`gmail-sync.mjs` persists its findings as a top-level state-blob key
-(same row shape: `{id, oid, kind, date, trackingNumber}`) so they survive
-headless runs. The app does not yet hydrate its Review queue from the
-blob (harmless: the underlying emails stay un-processed, so app-side
-Reconcile still finds them; `mergeState` only carries extra keys from
-its local side, so app saves may drop the cloud copy).
+`unmatchedStatus`: a first-class top-level state-blob key (rows `{id, oid,
+kind, date, trackingNumber}`, `id` = Gmail message id) — persisted, synced,
+and written by BOTH sides: the app's sync/Reconcile status pass mutates
+`working.unmatchedStatus` (no longer session-only React state; the Review
+queue reads `data.unmatchedStatus`, hydrated on load and on every
+`applyRemote()`/`connectCloud` merge), and `gmail-sync.mjs` records its
+headless findings the same way, so they now appear in the app's Needs
+Review queue. `mergeState` (`lib/syncMerge.js → mergeUnmatchedStatus`)
+merges the key as a union by row `id` with SELF-CLEANING instead of
+tombstones — a row is dropped on every merge once its `oid` matches an
+order that exists in the merged order list (created/imported anywhere) or
+its `id` is in merged processedIds (processed = matched; unmatched emails
+are deliberately never marked processed). Every local removal path (Find &
+import filters by `oid` before save; a Reconcile match filters by
+`id`/`oid` and marks the email processed) satisfies one of those rules, so
+the union can't resurrect cleared rows. The live-listener echo check and
+push-back staleness check consider the key too (`sameUnmatchedSet` /
+`remoteUnmatchedStale` — orders/ratings-only checks would drop an
+unmatched-only headless change). Old blobs without the key load as `[]`;
+Full re-sync clears it (every status email re-applies from scratch).
 
 ## Key mechanisms (don't rediscover these)
 
@@ -197,7 +217,8 @@ its local side, so app saves may drop the cloud copy).
   `parent_order_sn=` in links (first-PO-in-HTML picks wrong siblings). Reconcile
   (wide) re-applies ALL status emails in history (cheap, idempotent,
   oldest-first). Unmatched ones are NOT marked processed; they go to
-  `unmatchedStatus` state → Review queue → "Find & import" (with a manual
+  the persisted `unmatchedStatus` list (see Data model) → Review queue →
+  "Find & import" (with a manual
   PO-paste field when no PO could be read at all, and the Gmail link there
   deep-links to the exact message via `#all/<messageId>`, not a search).
 - **PO-less status emails (tracking-number fallback)**: Temu's forwarded
@@ -521,6 +542,15 @@ its local side, so app saves may drop the cloud copy).
   (stays unverified, that's fine) for a non-expiring token), `SYNC_UID`
   (Matt's Firebase uid), `ANTHROPIC_API_KEY` (vision parsing now also spends
   from CI), plus possibly leftover `SHIP24_KEY` etc. (harmless fallbacks).
+- **Near-realtime relay (optional Tier 2 — docs/near-realtime-setup.md)**:
+  a `cloud/relay` Cloud Function in Matt's GCP project fronted by a
+  `RELAY_TOKEN` query-param secret, holding a fine-grained GitHub PAT
+  (Contents read+write, this repo only) in its env to fire
+  `repository_dispatch`. Feeds: Gmail `users.watch` → Pub/Sub topic
+  (`GMAIL_PUBSUB_TOPIC` repo Variable; push subscription MUST be created
+  with `--expiration-period=never` or it silently dies after 31 idle days)
+  and a Shippo "Track Updated" webhook. If the PAT expires the relay logs
+  errors and the crons silently cover — nothing user-visible breaks.
 - **Shippo**: free Starter plan + card; $0.01 per unique tracking number,
   polling free.
 - Pages: Settings → Pages → Source = GitHub Actions.

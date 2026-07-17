@@ -103,17 +103,75 @@ export function remoteRatingsStale(mergedRatings, remoteRatings) {
   });
 }
 
+/* ---------- Unmatched-status merge ----------
+   `unmatchedStatus` rows ({id, oid, kind, date, trackingNumber}) are status
+   emails that couldn't be matched to any stored order — produced by BOTH the
+   app's sync/Reconcile and the headless gmail-sync Action, so they must merge
+   like everything else or headless findings never reach the app's Review
+   queue (and an app save could silently drop the cloud copy).
+
+   Rows are IMMUTABLE per id (same email always yields the same row), so
+   there's no per-row timestamp to arbitrate — merge is a plain union by id.
+   Instead of tombstones, rows SELF-CLEAN against the merged truth: a row is
+   obsolete (and dropped, on every merge, no matter which side still carries
+   it) once
+     - its `oid` matches an order that now EXISTS in the merged order list
+       (the missing order was created/imported somewhere — that's the only
+       thing the row was waiting for), or
+     - its email `id` is in the merged processedIds (a processed status email
+       is by definition matched — unmatched ones are deliberately never
+       marked processed, see App.jsx's status pass).
+   Every local removal path (Find & import, a Reconcile match) is justified by
+   one of these two rules, so the union can never resurrect a cleared row. */
+export function mergeUnmatchedStatus(localRows, remoteRows, mergedOrders, mergedProcessedIds) {
+  const orderIds = new Set((mergedOrders || []).map((o) => o.id));
+  const processed = new Set(mergedProcessedIds || []);
+  const byId = new Map();
+  for (const r of [...(localRows || []), ...(remoteRows || [])]) {
+    if (!r?.id || byId.has(r.id)) continue;           // dedupe by email message id
+    if (processed.has(r.id)) continue;                // processed = matched, row obsolete
+    if (r.oid && orderIds.has(r.oid)) continue;       // order exists now, row obsolete
+    byId.set(r.id, r);
+  }
+  return Array.from(byId.values());
+}
+
+/* Fingerprint check (id set only — rows are immutable per id, see above).
+   Mirrors sameOrderSet/sameRatingSet: lets the live subscriber recognize
+   "nothing new" without deep equality. Orders/ratings-only checks would
+   silently drop an unmatched-only remote change (e.g. a headless run that
+   found new unmatched emails but changed nothing else). */
+export function sameUnmatchedSet(a, b) {
+  const aArr = a || [], bArr = b || [];
+  if (aArr.length !== bArr.length) return false;
+  const bIds = new Set(bArr.map((r) => r.id));
+  return aArr.every((r) => bIds.has(r.id));
+}
+
+/* Mirrors remoteIsStale/remoteRatingsStale — true when remote's row set
+   differs from the merged one AT ALL: remote missing a row means it hasn't
+   seen a new finding; remote HAVING a row the merge dropped means it's
+   carrying an obsolete row (self-cleaned above) that a push-back scrubs. */
+export function remoteUnmatchedStale(mergedRows, remoteRows) {
+  return !sameUnmatchedSet(mergedRows, remoteRows);
+}
+
 /* Merges two whole app-state blobs. Orders merge per-order (see above);
    ratings merge per-key (see above); processedIds is a plain union (never
-   loses "already processed" info); lastSync/autoSync are informational
-   bookkeeping, not safety-critical, so they're just taken from whichever
-   side has the newer top-level updatedAt. */
+   loses "already processed" info); unmatchedStatus is a union-by-id with
+   self-cleaning against the merged orders/processedIds (see above — either
+   side may lack the key entirely, old blobs predate it); lastSync/autoSync
+   are informational bookkeeping, not safety-critical, so they're just taken
+   from whichever side has the newer top-level updatedAt. */
 export function mergeState(local, remote) {
   const localOrders = local?.orders || [];
   const remoteOrders = remote?.orders || [];
   const orders = mergeOrders(localOrders, remoteOrders);
   const ratings = mergeRatings(local?.ratings, remote?.ratings);
   const processedIds = Array.from(new Set([...(local?.processedIds || []), ...(remote?.processedIds || [])]));
+  // Must be computed AFTER orders/processedIds — self-cleaning judges each
+  // row against the MERGED truth, not either side's partial view.
+  const unmatchedStatus = mergeUnmatchedStatus(local?.unmatchedStatus, remote?.unmatchedStatus, orders, processedIds);
   const localTs = local?.updatedAt || 0;
   const remoteTs = remote?.updatedAt || 0;
   const preferRemote = remoteTs > localTs;
@@ -122,6 +180,7 @@ export function mergeState(local, remote) {
     orders,
     ratings,
     processedIds,
+    unmatchedStatus,
     lastSync: preferRemote ? (remote?.lastSync ?? local?.lastSync ?? null) : (local?.lastSync ?? null),
     autoSync: preferRemote ? (remote?.autoSync ?? local?.autoSync ?? true) : (local?.autoSync ?? true),
     updatedAt: Math.max(localTs, remoteTs),
