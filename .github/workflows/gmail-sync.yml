@@ -14,7 +14,12 @@ name: Gmail background sync
 
 on:
   schedule:
-    - cron: "3-59/5 * * * *" # every 5 min, offset to avoid GH's busy :00/:05
+    # Safety-net cadence: near-realtime delivery comes from repository_dispatch
+    # (Gmail watch → Pub/Sub → cloud/relay — verified live 2026-07-17), so the
+    # cron only covers relay/watch outages. Was */5, but GH deprioritizes
+    # high-frequency crons so hard it actually fired every ~1.5-2h; twice
+    # hourly is more honest and cuts ~250 no-op runs/day.
+    - cron: "17,47 * * * *"
   workflow_dispatch: # manual "run now" from the Actions tab
   repository_dispatch:
     types: [gmail-sync] # near-realtime trigger (curl/Cloud Function relay)

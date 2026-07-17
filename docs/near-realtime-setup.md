@@ -1,7 +1,8 @@
 # Near-realtime sync (Tier 2) — one-time setup
 
-Tier 1 (already live) polls: the Gmail sync Action every ~5 minutes, the
-carrier Action every 6 hours. Tier 2 makes both **event-driven**:
+Tier 1 (already live) polls: the Gmail sync Action on a safety-net cron
+(twice hourly since Tier 2 went live — see the last section), the carrier
+Action every 6 hours. Tier 2 makes both **event-driven**:
 
 - **Email arrives** → Gmail `users.watch` publishes to a Pub/Sub topic →
   a push subscription POSTs to a tiny Cloud Function relay (`cloud/relay/`)
@@ -22,6 +23,16 @@ use a few hundred). No new paid services.
 Everything below is one-time. Commands are for **Windows PowerShell 5** —
 every command goes on its own line (PowerShell 5 does not support `&&`).
 Each `gcloud` command is ONE line, even when it wraps in your editor.
+
+> ⚠️ **Use a regular PowerShell window, NOT the "Google Cloud SDK Shell"**
+> (that shortcut opens `cmd.exe`, where the `$VARIABLE = ...` lines fail
+> with "'$VARIABLE' is not recognized"). After installing the SDK, `gcloud`
+> works from any PowerShell window. Run every step in the SAME window —
+> `$GH_PAT`/`$RELAY_TOKEN` only exist in the session that set them, and the
+> deploy + subscription + Shippo steps all need `$RELAY_TOKEN`. Before the
+> deploy step, type `$RELAY_TOKEN` on its own line to confirm it still
+> prints a value. Also run from the repo folder itself after `git pull
+> origin main` — `--source=cloud/relay` is relative to the repo root.
 
 ## Step 1 — Create a fine-grained GitHub PAT
 
@@ -217,28 +228,11 @@ gcloud pubsub subscriptions delete gmail-push-relay
 
 Cron polling continues exactly as before in every case.
 
-## Recommended follow-up: relax the gmail-sync cron
+## The gmail-sync cron is a safety net (done 2026-07-17)
 
-Once dispatch is verified working for a few days, the 5-minute cron stops
-being the delivery mechanism and becomes a pure safety net — but it still
-burns a full checkout + npm install every 5 minutes (~288 runs/day,
-nearly all "Nothing new"). Consider stretching it: in
-`.github/workflows/gmail-sync.yml`, change
-
-```yaml
-    - cron: "3-59/5 * * * *"   # every 5 minutes, offset from :00/:05
-```
-
-to
-
-```yaml
-    - cron: "17,47 * * * *"    # twice an hour, at :17 and :47
-```
-
-(5-field cron: minute, hour, day-of-month, month, day-of-week —
-`17,47 * * * *` = fire at minute 17 and minute 47 of every hour.) That
-cuts ~260 no-op runs/day while keeping worst-case fallback latency at
-~30 minutes *only in the rare case the whole event chain is down*.
-Not changed here on purpose — verify the event path first, then edit the
-one line whenever you're comfortable. The carrier cron is already only
-4×/day and worth keeping as-is.
+With dispatch verified live, the cron stopped being the delivery mechanism
+and became a pure safety net, so it was stretched from `3-59/5 * * * *`
+(every 5 min on paper — in practice GitHub deprioritized it to every
+~1.5–2h anyway) to `17,47 * * * *` (twice an hour, minutes 17 and 47).
+Worst-case fallback latency if the whole event chain is down: ~30 minutes.
+The carrier cron is only 4×/day and stays as-is.

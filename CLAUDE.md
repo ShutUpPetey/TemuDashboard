@@ -116,8 +116,9 @@ Key mechanisms), `lib/storage.js` (IndexedDB with localStorage migration),
 
 Workers: `scripts/carrier-eta.mjs` run by `.github/workflows/carrier-eta.yml`
 (cron every 6h + manual dispatch); `scripts/gmail-sync.mjs` run by
-`.github/workflows/gmail-sync.yml` (cron every 5 min + manual +
-`repository_dispatch type=gmail-sync`; green-skips until its secrets exist) —
+`.github/workflows/gmail-sync.yml` (safety-net cron twice hourly — delivery
+is via `repository_dispatch type=gmail-sync` from the Tier-2 relay, live
+since 2026-07-17 — + manual; green-skips until its secrets exist) —
 the headless incremental sync (see Key mechanisms); `scripts/push.mjs` —
 shared FCM send helper used by both workers; `scripts/gmail-auth.mjs` —
 one-time local loopback helper that mints the Gmail refresh token;
