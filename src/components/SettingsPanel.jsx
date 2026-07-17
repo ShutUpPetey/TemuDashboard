@@ -74,6 +74,37 @@ export default function SettingsPanel({ c, dark = true }) {
       </div>
 
       <div className={row}>
+        <span className={`${label} text-xs uppercase tracking-wide`}>Notifications</span>
+        {!c.pushConfigured ? (
+          <span className={`${label} text-xs`}>
+            Not set up — add VITE_FIREBASE_MESSAGING_SENDER_ID and VITE_FIREBASE_VAPID_KEY (see docs/phone-app-setup.md).
+          </span>
+        ) : c.pushNeedsInstall ? (
+          <span className={`${label} text-xs`}>
+            On iPhone/iPad, install the app first: Share → “Add to Home Screen”, then enable notifications here (iOS 16.4+).
+          </span>
+        ) : c.pushSupport === false ? (
+          <span className={`${label} text-xs`}>This browser doesn't support web push notifications.</span>
+        ) : c.cloudState !== "on" ? (
+          <span className={`${label} text-xs`}>Sign in with Google above first — notification devices are registered to your cloud account.</span>
+        ) : (
+          <>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={!!c.pushEnabled}
+                disabled={c.pushBusy || c.pushSupport !== true}
+                onChange={c.togglePush}
+              />
+              Push notifications on this device
+            </label>
+            {c.pushBusy && <span className="text-amber-500 text-xs">Working…</span>}
+            {!c.pushBusy && c.pushEnabled && <span className="text-emerald-500 text-xs">● Registered</span>}
+          </>
+        )}
+      </div>
+
+      <div className={row}>
         <span className={`${label} text-xs uppercase tracking-wide`}>Anthropic API key</span>
         <input
           type="password"

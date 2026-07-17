@@ -5,7 +5,7 @@ import { downloadCsv, itemsCsv, ordersCsv } from "./lib/exportCsv";
 import { applyDiscounts } from "./lib/discounts";
 import { callClaude, cancelCurrentCall, textOf, extractJSON, getApiKey, setApiKey, recordUsage, estimateCostPerCall } from "./lib/anthropic";
 import { getToken, getStoredToken, isSignedIn, hasConsented, signIn, signOut } from "./lib/gis";
-import { cloudConfigured, cloudSignIn, cloudSignOut, cloudRestore, cloudGet, cloudSet, cloudSubscribe, cloudSubscribeCarrier, cloudClockSkew, cloudListDirectory, cloudGetUserState } from "./lib/firebase";
+import { cloudConfigured, cloudSignIn, cloudSignOut, cloudRestore, cloudGet, cloudSet, cloudSubscribe, cloudSubscribeCarrier, cloudClockSkew, cloudListDirectory, cloudGetUserState, pushConfigured, pushSupported, pushLocallyEnabled, pushEnable, pushDisable, pushRefresh, pushOnForeground } from "./lib/firebase";
 import {
   searchMessages, getMessageMetadata, getMessageFull, headerValue,
   extractHtml, extractSection, extractAllSections, extractImgSrcs, extractPoNumber, extractSubOrders,
@@ -74,6 +74,16 @@ export default function App() {
   const [cloudDirty, setCloudDirty] = useState(false); // a save landed while cloud sync wasn't connected — local-only until reconnect
   const [carrier, setCarrier] = useState({}); // trackingNumber → live 17TRACK info (from the GitHub Action)
   const [cloudEmail, setCloudEmail] = useState(null); // signed-in Firebase user's email, once connected
+
+  /* ----- push notifications (optional FCM, per-device) -----
+     pushEnabled mirrors the localStorage marker (lib/firebase.js) so the
+     Settings toggle survives reloads; pushSupport is the async browser-
+     capability probe (null = still checking). All of it is inert unless
+     VITE_FIREBASE_MESSAGING_SENDER_ID + VITE_FIREBASE_VAPID_KEY are set. */
+  const [pushEnabled, setPushEnabled] = useState(() => pushLocallyEnabled());
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushSupport, setPushSupport] = useState(null);
+  const pushFgUnsubRef = useRef(null); // foreground onMessage unsubscribe
 
   /* ----- admin: read-only "view as user" (see AdminPanel.jsx) -----
      directory: {uid: {email, lastSeen}} for every registered user, loaded
@@ -408,6 +418,84 @@ export default function App() {
     setAdminViewState(null);
     pushLog("Signed out of Google.");
   }, []);
+
+  /* ----- push notifications (see lib/firebase.js push section) ----- */
+
+  /* One-time capability probe: is web push even possible in this browser?
+     (False on iOS Safari in a plain tab — Notification doesn't exist until
+     the PWA is installed to the home screen — and when unconfigured.) */
+  useEffect(() => {
+    if (!pushConfigured()) { setPushSupport(false); return; }
+    let alive = true;
+    pushSupported().then((ok) => { if (alive) setPushSupport(ok); }).catch(() => { if (alive) setPushSupport(false); });
+    return () => { alive = false; };
+  }, []);
+
+  /* Foreground messages (tab open and focused) bypass the SW notification
+     path — log them to the sync log instead. Idempotent via ref. */
+  const ensurePushForegroundLog = useCallback(async () => {
+    if (pushFgUnsubRef.current) return;
+    try {
+      pushFgUnsubRef.current = await pushOnForeground((payload) => {
+        const d = payload?.data || {};
+        pushLog(`🔔 ${d.title || "Push notification"}${d.body ? " — " + d.body : ""}`, "info");
+      });
+    } catch { /* foreground logging is a nicety, never worth failing over */ }
+  }, []);
+
+  /* On each cloud connect, re-validate this device's token if push was
+     enabled here: FCM tokens rotate, and updatedAt tells the sending Action
+     which devices are still alive. pushRefresh() also self-heals the toggle
+     when browser permission was revoked since (returns null → flip off). */
+  useEffect(() => {
+    if (cloudState !== "on" || !pushConfigured() || !pushLocallyEnabled()) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = await pushRefresh();
+        if (cancelled) return;
+        if (token) {
+          setPushEnabled(true);
+          ensurePushForegroundLog();
+        } else if (!pushLocallyEnabled()) {
+          setPushEnabled(false);
+          pushLog("Push notifications were turned off — browser permission is no longer granted.", "warn");
+        }
+      } catch (e) {
+        pushLog("Push token refresh failed: " + e.message, "warn");
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cloudState]);
+
+  const togglePush = useCallback(async () => {
+    setPushBusy(true);
+    try {
+      if (pushLocallyEnabled()) {
+        await pushDisable();
+        setPushEnabled(false);
+        pushLog("Push notifications disabled on this device.", "ok");
+      } else {
+        await pushEnable();
+        setPushEnabled(true);
+        ensurePushForegroundLog();
+        pushLog("Push notifications enabled on this device.", "ok");
+      }
+    } catch (e) {
+      setPushEnabled(pushLocallyEnabled());
+      pushLog("Push notifications: " + e.message, "error");
+    } finally {
+      setPushBusy(false);
+    }
+  }, [ensurePushForegroundLog]);
+
+  /* iOS Safari pre-install: Notification doesn't exist in a normal tab, but
+     DOES once the PWA runs standalone from the home screen (iOS 16.4+) —
+     used by SettingsPanel to show "install first" instead of a dead toggle. */
+  const pushNeedsInstall =
+    typeof Notification === "undefined" &&
+    !(window.matchMedia?.("(display-mode: standalone)")?.matches || navigator.standalone === true);
 
   /* ----- admin: directory + read-only "view as user" ----- */
   const isAdmin = !!(ADMIN_EMAIL && cloudEmail && cloudEmail === ADMIN_EMAIL);
@@ -1488,6 +1576,7 @@ export default function App() {
     lightbox, setLightbox,
     layoutOverride, setLayoutOverride,
     cloudState, cloudDirty, carrier,
+    pushConfigured: pushConfigured(), pushSupport, pushEnabled, pushBusy, pushNeedsInstall, togglePush,
     openWelcome,
     isAdmin, directory, directoryError, loadDirectory,
     adminViewUid, adminViewState, adminViewLoading, viewUserData, exitAdminView,
