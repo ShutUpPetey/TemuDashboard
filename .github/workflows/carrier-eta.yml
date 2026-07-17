@@ -9,6 +9,15 @@ on:
   schedule:
     - cron: "23 3,9,15,21 * * *" # every 6 hours (offset to avoid GH's busy :00)
   workflow_dispatch: # manual "run now" from the Actions tab
+  repository_dispatch:
+    types: [carrier-eta] # near-realtime trigger (Shippo webhook → cloud/relay)
+
+# Shippo's webhook fires once per tracking EVENT, so a package sweeping
+# through a sort facility can burst several dispatches in a minute. Queue
+# them into at most one follow-up run instead of racing Firebase writes.
+concurrency:
+  group: carrier-eta
+  cancel-in-progress: false
 
 jobs:
   refresh:

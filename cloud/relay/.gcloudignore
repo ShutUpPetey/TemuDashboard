@@ -1,0 +1,6 @@
+# Keep the deploy upload to just index.js + package.json — Cloud Build
+# installs dependencies itself, so a local node_modules (if one ever
+# exists here) must not be uploaded.
+node_modules/
+package-lock.json
+.gcloudignore

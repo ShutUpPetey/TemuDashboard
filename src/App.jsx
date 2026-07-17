@@ -12,7 +12,7 @@ import {
   extractOrderLink, extractEta, isOrderDetailLink, extractPoFromBody, extractTracking,
 } from "./lib/gmail";
 import { buildStats, reviewQueue, inTransitOrders, isActiveStatus, analyticsItemKey, freeItems, ratingQueues, remapRatingsAfterReplace } from "./lib/derive";
-import { mergeState, remoteIsStale, sameOrderSet, remoteRatingsStale, sameRatingSet } from "./lib/syncMerge";
+import { mergeState, remoteIsStale, sameOrderSet, remoteRatingsStale, sameRatingSet, remoteUnmatchedStale, sameUnmatchedSet } from "./lib/syncMerge";
 import { CATEGORIES, fmt, numOrNull, annotateThumbs, Lightbox, THUMB_SIZE_KEY, THUMB_SIZE_DEFAULT } from "./components/shared";
 import { useLayoutMode } from "./hooks/useMediaQuery";
 import DesktopShell from "./components/DesktopShell";
@@ -47,7 +47,7 @@ const ANALYTICS_IGNORE_KEY = "temu-analytics-ignore-v1";
 const ADMIN_EMAIL = import.meta.env.VITE_ADMIN_EMAIL || null;
 
 export default function App() {
-  const [data, setData] = useState({ orders: [], processedIds: [], lastSync: null, autoSync: true, ratings: {} });
+  const [data, setData] = useState({ orders: [], processedIds: [], lastSync: null, autoSync: true, ratings: {}, unmatchedStatus: [] });
   const [loaded, setLoaded] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [log, setLog] = useState([]);
@@ -57,7 +57,11 @@ export default function App() {
   const [apiKeyInput, setApiKeyInput] = useState(() => getApiKey());
   const [googleSignedIn, setGoogleSignedIn] = useState(() => isSignedIn());
   const [failedEmails, setFailedEmails] = useState([]);
-  const [unmatchedStatus, setUnmatchedStatus] = useState([]); // status emails with no matching order
+  // NOTE: unmatchedStatus (status emails with no matching order) used to be
+  // session-only React state here. It now lives IN the persisted data blob
+  // (data.unmatchedStatus) so the headless gmail-sync Action's findings show
+  // up in the Review queue too, and survive reloads — see the sync() status
+  // pass, importMissingOrder, and lib/syncMerge.js's mergeUnmatchedStatus.
   const [thumbSize, setThumbSize] = useState(() => Number(localStorage.getItem(THUMB_SIZE_KEY)) || THUMB_SIZE_DEFAULT);
   const [ignoredAnalytics, setIgnoredAnalytics] = useState(() => {
     try { return JSON.parse(localStorage.getItem(ANALYTICS_IGNORE_KEY) || "[]"); } catch { return []; }
@@ -200,15 +204,18 @@ export default function App() {
       const parsed = JSON.parse(val.json);
       const localNow = dataRef.current || {};
       const merged = mergeState(localNow, parsed);
-      // Both fingerprints must agree nothing changed — a ratings-only
+      // ALL fingerprints must agree nothing changed — a ratings-only
       // remote edit leaves merged.orders identical to localNow.orders, so
       // checking orders alone would silently drop it (see lib/syncMerge.js
-      // "Ratings merge" header).
-      if (sameOrderSet(merged.orders, localNow.orders || []) && sameRatingSet(merged.ratings, localNow.ratings || {})) return; // our own echo, or nothing new
+      // "Ratings merge" header). Same for unmatchedStatus: a headless
+      // gmail-sync run that only found new UNMATCHED status emails changes
+      // neither orders nor ratings, and its findings must still land here
+      // or they'd never reach the Review queue.
+      if (sameOrderSet(merged.orders, localNow.orders || []) && sameRatingSet(merged.ratings, localNow.ratings || {}) && sameUnmatchedSet(merged.unmatchedStatus, localNow.unmatchedStatus || [])) return; // our own echo, or nothing new
       dataRef.current = merged; // synchronous, so callbacks never see pre-merge state
       setData(merged);
       storage.set(STORAGE_KEY, JSON.stringify(merged)).catch(() => {});
-      if (remoteIsStale(merged.orders, parsed.orders) || remoteRatingsStale(merged.ratings, parsed.ratings)) {
+      if (remoteIsStale(merged.orders, parsed.orders) || remoteRatingsStale(merged.ratings, parsed.ratings) || remoteUnmatchedStale(merged.unmatchedStatus, parsed.unmatchedStatus)) {
         cloudSet(JSON.stringify(merged), merged.updatedAt).catch(() => {});
       }
       pushLog(note, "ok");
@@ -258,9 +265,10 @@ export default function App() {
           dataRef.current = merged; // before setData: await-ers read the merged state immediately
           setData(merged);
           storage.set(STORAGE_KEY, JSON.stringify(merged)).catch(() => {});
-          if (remoteIsStale(merged.orders, parsed.orders) || remoteRatingsStale(merged.ratings, parsed.ratings)) {
+          if (remoteIsStale(merged.orders, parsed.orders) || remoteRatingsStale(merged.ratings, parsed.ratings) || remoteUnmatchedStale(merged.unmatchedStatus, parsed.unmatchedStatus)) {
             // Remote was missing something local had, or had an older copy
-            // of some order/rating — push the merged truth back so both
+            // of some order/rating, or carried unmatched-status rows the
+            // merge added/self-cleaned — push the merged truth back so both
             // sides converge instead of staying split.
             await cloudSet(JSON.stringify(merged), merged.updatedAt).catch(() => {});
           }
@@ -565,6 +573,7 @@ export default function App() {
           lastSync: parsed.lastSync || null,
           autoSync: parsed.autoSync ?? true,
           ratings: parsed.ratings || {},
+          unmatchedStatus: parsed.unmatchedStatus || [], // pre-persistence backups simply lack the key
         });
         pushLog(`Imported ${parsed.orders?.length || 0} order(s).`, "ok");
       } catch (e) {
@@ -1001,11 +1010,17 @@ export default function App() {
         return;
       }
       const base = dataRef.current || data; // dataRef, not the render closure — see save()
-      const working = { ...base, orders: [...base.orders], processedIds: [...base.processedIds] };
+      const working = { ...base, orders: [...base.orders], processedIds: [...base.processedIds], unmatchedStatus: [...(base.unmatchedStatus || [])] };
       await processOrderEmail(found, token, working, { forceId: po });
       if (working.orders.some((o) => o.id === po)) {
+        // Drop this PO's Review-queue rows BEFORE saving, so the removal
+        // persists (and syncs) atomically with the imported order instead of
+        // flickering back on the next cloud merge. The merge can't resurrect
+        // them anyway — the order now exists, which self-cleans its rows in
+        // mergeUnmatchedStatus (lib/syncMerge.js) — this just keeps the local
+        // UI consistent in the same paint.
+        working.unmatchedStatus = working.unmatchedStatus.filter((x) => x.oid !== po);
         await save({ ...working });
-        setUnmatchedStatus((u) => u.filter((x) => x.oid !== po));
         pushLog(`✓ ${po} imported — run Reconcile to re-apply its status emails.`, "ok");
       } else {
         await save({ ...working });
@@ -1249,9 +1264,16 @@ export default function App() {
       // every first sync after a page load, i.e. normal daily use.
       await connectCloud(token);
       const base = dataRef.current || data;
+      // unmatchedStatus is copied (it's mutated by the status pass below and
+      // persisted with the blob); a full re-sync clears it along with orders/
+      // processedIds — every status email gets re-applied from scratch, so
+      // still-unmatched ones re-add themselves and stale rows don't linger.
+      // (Cloud rows a full re-sync DID match stay gone after the post-save
+      // merge: their email ids land in processedIds, which self-cleans them
+      // in mergeUnmatchedStatus.)
       const working = full
-        ? { ...base, orders: [], processedIds: [] }
-        : { ...base, orders: [...(base.orders || [])], processedIds: [...(base.processedIds || [])] };
+        ? { ...base, orders: [], processedIds: [], unmatchedStatus: [] }
+        : { ...base, orders: [...(base.orders || [])], processedIds: [...(base.processedIds || [])], unmatchedStatus: [...(base.unmatchedStatus || [])] };
       // Full re-sync rebuilds every order from fresh vision parses — the
       // same wholesale items[] replacement rereadOrder does, for every
       // order at once. Snapshot the outgoing items so ratings can be
@@ -1454,7 +1476,12 @@ export default function App() {
             statApplied++;
             pushLog(`✓ ${oid} → ${em.kind}${matchedByTracking ? " (matched by tracking #, no PO in email)" : ""}${em.kind === "shipped" && target.eta ? ` (est. ${target.eta})` : ""}${em.kind === "shipped" && target.tracking?.carrier ? ` · ${target.tracking.carrier}` : ""}`, "ok");
             if (!working.processedIds.includes(em.id)) working.processedIds.push(em.id);
-            setUnmatchedStatus((u) => u.filter((x) => x.id !== em.id && x.oid !== oid));
+            // Matched → any Review-queue row for this email OR this order is
+            // obsolete. Removed from the working blob (persisted at save) so
+            // it stays gone; the cloud merge can't resurrect it either, since
+            // the email is now processed and the order exists — both
+            // self-cleaning rules in mergeUnmatchedStatus (lib/syncMerge.js).
+            working.unmatchedStatus = working.unmatchedStatus.filter((x) => x.id !== em.id && x.oid !== oid);
           } else {
             // Deliberately NOT marked processed: if the order confirmation
             // failed to parse this run (or hasn't been read yet), marking
@@ -1463,7 +1490,12 @@ export default function App() {
             // and offer a targeted "find & import" of the missing order.
             statUnmatched++;
             pushLog(`✗ ${em.kind} email has no matching order${oid ? ` (${oid})` : tracking?.number ? ` (no PO, tracking ${tracking.number} matches no stored order)` : " (no PO found in it)"} — see Needs review.`, "warn");
-            setUnmatchedStatus((u) => (u.some((x) => x.id === em.id) ? u : [...u, { id: em.id, oid: oid || null, kind: em.kind, date: em.date, trackingNumber: tracking?.number || null }]));
+            // Deduped by email id — the same row may already be here from a
+            // previous run, a Reconcile re-pass, or a headless gmail-sync run
+            // (same row shape, merged in from the cloud blob).
+            if (!working.unmatchedStatus.some((x) => x.id === em.id)) {
+              working.unmatchedStatus.push({ id: em.id, oid: oid || null, kind: em.kind, date: em.date, trackingNumber: tracking?.number || null });
+            }
           }
         }
         if (statApplied || statUnmatched) {
@@ -1562,7 +1594,7 @@ export default function App() {
     syncing, sync, cancelSync,
     log, pushLog,
     failedEmails, retryFailedEmails, rereadOrder, testConnection,
-    unmatchedStatus, importMissingOrder, fixEstimatedPrices, fixAllEstimatedPrices,
+    unmatchedStatus: data.unmatchedStatus || [], importMissingOrder, fixEstimatedPrices, fixAllEstimatedPrices,
     googleSignedIn, handleGoogleSignIn, handleGoogleSignOut,
     apiKeyInput, setApiKeyInput, saveApiKey,
     thumbSize, updateThumbSize,

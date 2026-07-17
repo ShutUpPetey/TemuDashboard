@@ -121,10 +121,15 @@ Action).
 Actions tab → *Gmail background sync* → "…" menu → **Disable workflow**
 (or delete the `GMAIL_REFRESH_TOKEN` secret — runs then skip green).
 
-## Tier 2 — near-realtime later (not set up yet)
+## Tier 2 — near-realtime (now implemented)
 
-The workflow already listens for `repository_dispatch` events of type
-`gmail-sync`, so anything with a GitHub token can trigger an immediate run:
+Tier 2 is built: **see `docs/near-realtime-setup.md`** for the Gmail
+watch → Pub/Sub → Cloud Function relay (`cloud/relay/`) setup that turns
+new-email arrival and Shippo tracking events into immediate workflow runs.
+
+For reference, the underlying mechanism: the workflow listens for
+`repository_dispatch` events of type `gmail-sync`, so anything with a
+GitHub token can trigger an immediate run:
 
 ```bash
 curl -X POST \

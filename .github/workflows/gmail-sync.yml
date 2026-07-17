@@ -71,3 +71,9 @@ jobs:
           # Spend guard: max Claude vision calls per run (leftovers wait
           # for the next run). Override via a repo Variable if desired.
           MAX_VISION_PER_RUN: ${{ vars.MAX_VISION_PER_RUN || 20 }}
+          # Near-realtime tier (optional — docs/near-realtime-setup.md):
+          # when set (e.g. projects/temu-dashboard-962d6/topics/gmail-push),
+          # each run re-registers the 7-day Gmail users.watch on this topic
+          # so new mail keeps triggering the repository_dispatch relay.
+          # Unset = the watch step skips silently and cron does everything.
+          GMAIL_PUBSUB_TOPIC: ${{ vars.GMAIL_PUBSUB_TOPIC }}
