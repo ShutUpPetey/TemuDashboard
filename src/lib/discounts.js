@@ -73,9 +73,60 @@ export function applyDiscounts(order) {
   // and inflate spend stats by the entire list amount.
   const factor = base > 0 ? Math.min(Math.max(netMerch, 0) / base, 1.5) : 1;
   order.discountFactor = factor;
+  // When neither a total nor a discount line was extracted, the factor
+  // degenerates to ~1 ("assume sticker price"). On Temu that's nearly
+  // always wrong — real receipts always print a total, so a missing one
+  // is an extraction failure, not evidence of no discount (a $26.21
+  // list item can really cost $1.99). Flag such items estimated so they
+  // surface in Review and "Try real prices" can recover the real
+  // numbers from a status email, instead of hiding behind a
+  // confident-looking full-price figure.
+  const unverified = missingChargeEvidence(order);
   items.forEach((it) => {
     it.paid = +((it.listed || 0) * factor).toFixed(2);
-    it.discountPct = 1 - factor;
+    it.discountPct = unverified ? null : 1 - factor;
+    if (unverified) {
+      it.estimated = true;
+      it.listedUnknown = false;
+    }
   });
   return order;
+}
+
+/* True when the parse produced no evidence of what was actually charged:
+   no order total AND no discount line. Kept as its own export so the
+   one-time repair pass below and applyDiscounts can't drift apart. */
+export function missingChargeEvidence(order) {
+  return order.total == null && order.discount == null;
+}
+
+/* One-time repair for orders parsed BEFORE the unverified-price flag
+   existed: same predicate as applyDiscounts, applied to already-stored
+   orders (Reconcile can't help here — it re-applies status emails, it
+   doesn't re-run pricing). Mutates in place, stamps order.updatedAt so
+   the change wins the per-order cloud merge, returns how many orders
+   were flagged. Idempotent: already-flagged items are skipped, so this
+   is safe to run on every app load. manualEdit orders are never touched
+   (the human's numbers outrank the heuristic). */
+export function flagUnverifiedPrices(orders) {
+  let changed = 0;
+  for (const o of orders || []) {
+    if (o.manualEdit || !missingChargeEvidence(o)) continue;
+    const items = o.items || [];
+    // Only the listed-price path can hide unflagged — the no-listed-price
+    // branches of applyDiscounts have always flagged their output.
+    if (!items.some((it) => (it.listed || 0) > 0)) continue;
+    let touched = false;
+    for (const it of items) {
+      if (it.estimated || it.listedUnknown) continue;
+      it.estimated = true;
+      it.discountPct = null;
+      touched = true;
+    }
+    if (touched) {
+      o.updatedAt = Date.now();
+      changed++;
+    }
+  }
+  return changed;
 }

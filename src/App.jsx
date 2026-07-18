@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 
 import { storage } from "./lib/storage";
 import { downloadCsv, itemsCsv, ordersCsv } from "./lib/exportCsv";
-import { applyDiscounts } from "./lib/discounts";
+import { applyDiscounts, flagUnverifiedPrices } from "./lib/discounts";
 import { callClaude, cancelCurrentCall, textOf, extractJSON, getApiKey, setApiKey, recordUsage, estimateCostPerCall } from "./lib/anthropic";
 import { getToken, getStoredToken, isSignedIn, hasConsented, signIn, signOut } from "./lib/gis";
 import { cloudConfigured, cloudSignIn, cloudSignOut, cloudRestore, cloudGet, cloudSet, cloudSubscribe, cloudSubscribeCarrier, cloudClockSkew, cloudListDirectory, cloudGetUserState, pushConfigured, pushSupported, pushLocallyEnabled, pushEnable, pushDisable, pushRefresh, pushOnForeground } from "./lib/firebase";
@@ -143,7 +143,21 @@ export default function App() {
     (async () => {
       try {
         const r = await storage.get(STORAGE_KEY);
-        if (r?.value) setData((d) => ({ ...d, ...JSON.parse(r.value) }));
+        if (r?.value) {
+          const parsed = JSON.parse(r.value);
+          // One-time repair (idempotent, runs every load): orders parsed
+          // before applyDiscounts flagged the missing-charge-evidence case
+          // can carry confident-looking full-list "paid" prices. Flag them
+          // estimated so they surface in Review; per-order updatedAt is
+          // stamped inside so the fix wins the cloud merge on connect.
+          const flagged = flagUnverifiedPrices(parsed.orders);
+          if (flagged) {
+            parsed.updatedAt = Date.now();
+            storage.set(STORAGE_KEY, JSON.stringify(parsed)).catch(() => {});
+            pushLog(`Flagged ${flagged} order(s) whose receipt total never parsed — prices unverified, see Needs Review ("Try real prices" recovers them).`, "warn");
+          }
+          setData((d) => ({ ...d, ...parsed }));
+        }
       } catch { /* first run */ }
       try {
         const w = await storage.get(WELCOME_SEEN_KEY);

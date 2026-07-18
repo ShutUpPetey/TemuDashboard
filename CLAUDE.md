@@ -359,7 +359,19 @@ Full re-sync clears it (every status email re-applies from scratch).
   `applyDiscounts` also has a `base <= 0` catch-all: when there are no listed
   prices AND no usable total (e.g. a split email whose per-sub-order total
   failed to extract), items get `paid: null` + `estimated: true` instead of
-  the old silent, unflagged $0.00.
+  the old silent, unflagged $0.00. Since 2026-07-17 the OPPOSITE gap is
+  closed too (found via a real order: $26.21 shown, $1.99 actually paid,
+  no badge): listed prices present but NO total and NO discount line
+  extracted (`missingChargeEvidence()` in discounts.js) used to fall back
+  to factor≈1 — "assume sticker price" — silently and unflagged; such
+  items are now flagged `estimated` with `discountPct: null` (a missing
+  total is an extraction failure, never evidence of no discount — real
+  Temu receipts always print a total; note `total: 0` IS evidence, that's
+  the free-order case). `flagUnverifiedPrices(orders)` (same file) is the
+  one-time repair for orders stored before the flag existed — run on
+  every app load (idempotent, skips manualEdit, stamps per-order
+  `updatedAt` so the flags win the cloud merge), since Reconcile re-applies
+  status emails but never re-runs pricing.
 - **Analytics: spend-over-time period toggle, per-item ignore, free items
   (`AnalyticsView.jsx` + `lib/derive.js`)**: `spendByPeriod(orders, period,
   ignoredKeys)` buckets ACTIVE ORDERS' charged totals by day/week/month/year
