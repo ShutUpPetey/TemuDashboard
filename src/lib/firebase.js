@@ -97,6 +97,24 @@ export function currentUser() {
   return { uid, email };
 }
 
+/* Fresh Firebase ID token for the signed-in user, or null when signed
+   out / unconfigured. Used by lib/anthropic.js to authenticate against
+   the optional /claude relay proxy (the relay verifies it server-side
+   and checks the uid against its allowlist). The SDK caches and
+   auto-refreshes the token internally, so calling this per request is
+   cheap. Never throws — proxy availability is always best-effort and
+   callers fall back to the local key. */
+export async function cloudIdToken() {
+  if (!cloudConfigured() || !uid) return null;
+  try {
+    const { app, authMod } = await fb();
+    const user = authMod.getAuth(app).currentUser;
+    return user ? await user.getIdToken() : null;
+  } catch {
+    return null;
+  }
+}
+
 /* Try restoring the persisted Firebase session — the Firebase SDK keeps
    its own long-lived refresh token in browser storage, entirely separate
    from the ~1h Google access token used for Gmail. Resolves { uid, email }

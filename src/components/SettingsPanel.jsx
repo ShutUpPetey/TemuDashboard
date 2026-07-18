@@ -1,11 +1,21 @@
-import React, { useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Download, Upload, LogIn, LogOut, HelpCircle } from "lucide-react";
+import { claudeVia } from "../lib/anthropic";
 
 /* Settings content shared by both shells.
    `dark` renders the desktop (dark sidebar-app) styling; the mobile
    sheet uses light styling. All handlers come from ctx (App.jsx). */
 export default function SettingsPanel({ c, dark = true }) {
   const importInputRef = useRef(null);
+  // Which path callClaude would take right now (async — needs a Firebase
+  // ID token probe). Re-checked when cloud sign-in state or the pasted
+  // key changes; null while probing.
+  const [claudeMode, setClaudeMode] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    claudeVia().then((m) => { if (alive) setClaudeMode(m); }).catch(() => { if (alive) setClaudeMode("none"); });
+    return () => { alive = false; };
+  }, [c.cloudState, c.apiKeyInput]);
   const label = dark ? "text-stone-400" : "text-stone-500";
   const btn = dark
     ? "inline-flex items-center gap-1 text-stone-300 hover:text-white text-xs border border-stone-600 px-2 py-1 rounded-sm transition-colors"
@@ -106,15 +116,22 @@ export default function SettingsPanel({ c, dark = true }) {
 
       <div className={row}>
         <span className={`${label} text-xs uppercase tracking-wide`}>Anthropic API key</span>
+        {claudeMode === "proxy" && (
+          <span className="text-emerald-500 text-xs">● Using shared cloud key via relay (signed in)</span>
+        )}
         <input
           type="password"
           value={c.apiKeyInput}
           onChange={(e) => c.setApiKeyInput(e.target.value)}
           onBlur={(e) => c.saveApiKey(e.target.value.trim())}
-          placeholder="sk-ant-…"
+          placeholder={claudeMode === "proxy" ? "sk-ant-… (optional fallback)" : "sk-ant-…"}
           className={`border rounded-sm px-2 py-1 text-xs w-56 mono ${dark ? "bg-stone-800 border-stone-600 text-stone-100" : "bg-white border-stone-300 text-stone-800"}`}
         />
-        <span className={`${label} text-[11px]`}>stored only in this browser</span>
+        <span className={`${label} text-[11px]`}>
+          {claudeMode === "proxy"
+            ? "optional fallback — the relay's key is used while you're signed in"
+            : "stored only in this browser"}
+        </span>
       </div>
 
       <div className={row}>

@@ -45,6 +45,10 @@ jobs:
           # Settings toggle) — see docs/phone-app-setup.md.
           VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.VITE_FIREBASE_MESSAGING_SENDER_ID }}
           VITE_FIREBASE_VAPID_KEY: ${{ vars.VITE_FIREBASE_VAPID_KEY }}
+          # Optional shared-key Claude proxy: the relay's /claude URL
+          # (public-safe; leave unset to keep browser-direct calls with a
+          # pasted key) — see docs/near-realtime-setup.md → "/claude proxy".
+          VITE_CLAUDE_PROXY_URL: ${{ vars.VITE_CLAUDE_PROXY_URL }}
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
