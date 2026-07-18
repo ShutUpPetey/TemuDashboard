@@ -1,7 +1,8 @@
 # Near-realtime sync (Tier 2) — one-time setup
 
-Tier 1 (already live) polls: the Gmail sync Action every ~5 minutes, the
-carrier Action every 6 hours. Tier 2 makes both **event-driven**:
+Tier 1 (already live) polls: the Gmail sync Action on a safety-net cron
+(twice hourly since Tier 2 went live — see the last section), the carrier
+Action every 6 hours. Tier 2 makes both **event-driven**:
 
 - **Email arrives** → Gmail `users.watch` publishes to a Pub/Sub topic →
   a push subscription POSTs to a tiny Cloud Function relay (`cloud/relay/`)
@@ -22,6 +23,16 @@ use a few hundred). No new paid services.
 Everything below is one-time. Commands are for **Windows PowerShell 5** —
 every command goes on its own line (PowerShell 5 does not support `&&`).
 Each `gcloud` command is ONE line, even when it wraps in your editor.
+
+> ⚠️ **Use a regular PowerShell window, NOT the "Google Cloud SDK Shell"**
+> (that shortcut opens `cmd.exe`, where the `$VARIABLE = ...` lines fail
+> with "'$VARIABLE' is not recognized"). After installing the SDK, `gcloud`
+> works from any PowerShell window. Run every step in the SAME window —
+> `$GH_PAT`/`$RELAY_TOKEN` only exist in the session that set them, and the
+> deploy + subscription + Shippo steps all need `$RELAY_TOKEN`. Before the
+> deploy step, type `$RELAY_TOKEN` on its own line to confirm it still
+> prints a value. Also run from the repo folder itself after `git pull
+> origin main` — `--source=cloud/relay` is relative to the repo root.
 
 ## Step 1 — Create a fine-grained GitHub PAT
 
@@ -217,28 +228,106 @@ gcloud pubsub subscriptions delete gmail-push-relay
 
 Cron polling continues exactly as before in every case.
 
-## Recommended follow-up: relax the gmail-sync cron
+## Optional: shared Claude key for the browser app (/claude proxy)
 
-Once dispatch is verified working for a few days, the 5-minute cron stops
-being the delivery mechanism and becomes a pure safety net — but it still
-burns a full checkout + npm install every 5 minutes (~288 runs/day,
-nearly all "Nothing new"). Consider stretching it: in
-`.github/workflows/gmail-sync.yml`, change
+The dashboard normally needs an Anthropic API key pasted into Settings on
+every device (stored in that browser's localStorage). This optional step
+adds a `/claude` endpoint to the **same relay function you deployed
+above** that holds the key server-side and forwards the browser's vision
+calls to Anthropic — signed-in devices then work with the key field
+empty.
 
-```yaml
-    - cron: "3-59/5 * * * *"   # every 5 minutes, offset from :00/:05
+**How the security works** (why it's built this way):
+
+- The Anthropic key can never live in the deployed site: GitHub Pages is
+  a static bundle, so anything "in the app" — source, env-baked
+  constants, localStorage — is readable by anyone who opens the page or
+  devtools. The only place a shared key can safely live is a server, and
+  the relay is the server you already have.
+- The browser authenticates to `/claude` with its **Firebase ID token**
+  (the short-lived session token cloud sync already maintains). The
+  relay verifies the token against Google's Identity Toolkit API — that
+  proves it's a valid, unexpired sign-in of *this* Firebase project —
+  and then checks the uid against the `ALLOWED_UIDS` allowlist before
+  spending the key. It also forces the model and caps `max_tokens`
+  server-side, so a leaked ID token can at worst make normal-sized
+  vision calls until it expires (~1 h).
+- `RELAY_TOKEN` is **not** used here, on purpose: that secret is
+  embedded in the Pub/Sub and Shippo URLs. Shipping it to the browser
+  would publish it to everyone; `/claude` therefore rejects it and only
+  accepts Firebase ID tokens.
+- Other people using the multi-user app are unaffected: anyone not in
+  `ALLOWED_UIDS` gets a 403 from the proxy and simply keeps bringing
+  their own key in Settings, exactly as before. Add a uid to
+  `ALLOWED_UIDS` (comma-separated) only if you want that account to
+  spend your key.
+
+Same PowerShell rules as the rest of this doc: regular PowerShell (not
+the Cloud SDK Shell), one command per line, each `gcloud` command is ONE
+line even when it wraps.
+
+### Step A — Redeploy the relay with the new env vars
+
+You need three values:
+
+| Env var | Value |
+|---|---|
+| `ANTHROPIC_API_KEY` | Your Anthropic key (`sk-ant-…`) — same value as the repo Secret used by the gmail-sync Action. |
+| `FIREBASE_API_KEY` | The **public** Firebase web API key — the exact same value as the `VITE_FIREBASE_API_KEY` repo Variable. (It's not a secret; the relay only uses it to address the token-verification endpoint.) |
+| `ALLOWED_UIDS` | Your Firebase uid — same value as the `SYNC_UID` repo Secret. Comma-separate to allow more accounts later. |
+
+```powershell
+$ANTHROPIC_KEY = "sk-ant-PASTE-YOURS"
+gcloud functions deploy temu-relay --gen2 --runtime=nodejs20 --region=us-central1 --source=cloud/relay --entry-point=relay --trigger-http --allow-unauthenticated --timeout=180s --update-env-vars "ANTHROPIC_API_KEY=$ANTHROPIC_KEY,FIREBASE_API_KEY=PASTE-VITE_FIREBASE_API_KEY,ALLOWED_UIDS=PASTE-YOUR-FIREBASE-UID"
 ```
 
-to
+Notes:
 
-```yaml
-    - cron: "17,47 * * * *"    # twice an hour, at :17 and :47
-```
+- Run from the repo folder after `git pull origin main` (the deploy
+  uploads `cloud/relay`, which now contains the `/claude` handler).
+- `--update-env-vars` **keeps** the existing `GITHUB_TOKEN` /
+  `RELAY_TOKEN` / `GITHUB_REPO` values — do not use `--set-env-vars`
+  here, that would wipe them.
+- `--timeout=180s` matters: the gen2 default is 60 s and vision calls
+  regularly run longer; the proxy waits up to 120 s on Anthropic.
+- Optional: add `ALLOWED_ORIGIN=…` to the list only if the app is ever
+  served from somewhere other than `https://shutuppetey.github.io`
+  (that's the built-in default CORS origin).
 
-(5-field cron: minute, hour, day-of-month, month, day-of-week —
-`17,47 * * * *` = fire at minute 17 and minute 47 of every hour.) That
-cuts ~260 no-op runs/day while keeping worst-case fallback latency at
-~30 minutes *only in the rare case the whole event chain is down*.
-Not changed here on purpose — verify the event path first, then edit the
-one line whenever you're comfortable. The carrier cron is already only
-4×/day and worth keeping as-is.
+### Step B — Add the repo Variable and redeploy Pages
+
+GitHub repo → **Settings → Secrets and variables → Actions →
+Variables** → *New repository variable*:
+
+| Variable | Value |
+|---|---|
+| `VITE_CLAUDE_PROXY_URL` | `FUNCTION_URL/claude` (the Step-4 URL, e.g. `https://temu-relay-xxxxxxxxxx-uc.a.run.app/claude`) |
+
+Then re-run the Pages deploy: **Actions → Deploy to GitHub Pages → Run
+workflow** (or just push any commit to `main`).
+
+### Step C — Verify
+
+1. Open the deployed app **signed in** to cloud sync. Settings → the
+   Anthropic API key row should show **"● Using shared cloud key via
+   relay (signed in)"** and label the key field as an optional fallback.
+2. Clear the key field (blur to save), then run a Re-read (↺) on any
+   order — it should succeed with no key stored on the device.
+3. Negative check (optional): open the app in a private window without
+   signing in — vision calls should ask for a key again, and a direct
+   `Invoke-WebRequest -Method POST -Uri "FUNCTION_URL/claude"` should
+   return 401 (or 503 if the env vars from Step A didn't stick).
+
+If proxy calls fail, read the function's logs
+(`gcloud functions logs read temu-relay --gen2 --region=us-central1`):
+`503 proxy not configured` = env vars missing, `401` = bad/expired ID
+token, `403` = the uid isn't in `ALLOWED_UIDS`.
+
+## The gmail-sync cron is a safety net (done 2026-07-17)
+
+With dispatch verified live, the cron stopped being the delivery mechanism
+and became a pure safety net, so it was stretched from `3-59/5 * * * *`
+(every 5 min on paper — in practice GitHub deprioritized it to every
+~1.5–2h anyway) to `17,47 * * * *` (twice an hour, minutes 17 and 47).
+Worst-case fallback latency if the whole event chain is down: ~30 minutes.
+The carrier cron is only 4×/day and stays as-is.

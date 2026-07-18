@@ -1,21 +1,33 @@
 /* ============================================================
-   Browser-direct Anthropic API client.
-   Replaces the keyless artifact-only `fetch("https://api.anthropic.com/v1/messages")`
-   call with a user-supplied API key, sent from the browser with the
-   `anthropic-dangerous-direct-browser-access` header (required for
-   CORS when calling api.anthropic.com directly from a page, since the
-   API doesn't allow browser origins by default).
+   Anthropic API client — two modes, decided per call:
 
-   SECURITY NOTE: the API key lives only in this browser's localStorage
-   and is sent directly from the browser to Anthropic on every call. It
-   is never sent anywhere else and is never committed to the repo. Since
-   it's client-side, anyone with access to this browser profile (or to
-   devtools while the page is open) could read it — acceptable for a
-   personal single-user tool, not for anything shared/multi-user.
+   1. PROXY (preferred when available): if VITE_CLAUDE_PROXY_URL is set
+      (the cloud/relay function's /claude endpoint) AND the user has a
+      live Firebase session, calls go to the relay with the Firebase ID
+      token as `Authorization: Bearer`. The Anthropic key lives ONLY in
+      the relay's server-side env — it never reaches this bundle, the
+      network tab, or localStorage. The relay verifies the token and
+      enforces its own uid allowlist, model, and max_tokens caps.
+
+   2. LOCAL KEY (original mode, and the fallback): a user-supplied API
+      key from this browser's localStorage, sent directly to
+      api.anthropic.com with the `anthropic-dangerous-direct-browser-access`
+      header (required for CORS when calling the API from a page).
+
+   SECURITY NOTE: in local-key mode the key lives only in this browser's
+   localStorage and is sent only to Anthropic — never anywhere else,
+   never committed to the repo. Anyone with this browser profile (or
+   devtools) could read it, which is why proxy mode exists for the
+   multi-user case: the browser then holds no Anthropic secret at all,
+   only its own Firebase session. The relay's RELAY_TOKEN is a separate
+   secret for the Pub/Sub/Shippo endpoints and is never used here.
    ============================================================ */
+
+import { cloudIdToken } from "./firebase";
 
 const MODEL = "claude-sonnet-5";
 const API_KEY_STORAGE_KEY = "temu-anthropic-key";
+const PROXY_URL = import.meta.env.VITE_CLAUDE_PROXY_URL || "";
 
 export function getApiKey() {
   return localStorage.getItem(API_KEY_STORAGE_KEY) || "";
@@ -26,11 +38,27 @@ export function setApiKey(key) {
   else localStorage.removeItem(API_KEY_STORAGE_KEY);
 }
 
+/* Which call path callClaude would take right now:
+   "proxy" (relay configured + signed in to cloud), "local-key"
+   (pasted key in localStorage), or "none". Async because the proxy
+   check needs a live Firebase ID token. Used by Settings + log lines
+   only — callClaude re-decides per call. */
+export async function claudeVia() {
+  if (PROXY_URL && (await cloudIdToken())) return "proxy";
+  return getApiKey() ? "local-key" : "none";
+}
+
 let currentAbort = null;
 
 export async function callClaude(userContent, { timeoutMs = 150000, maxTokens = 2000 } = {}) {
-  const apiKey = getApiKey();
-  if (!apiKey) throw new Error("No Anthropic API key set — add one in Settings.");
+  // Proxy first: relay configured AND signed in → server-held key. The
+  // Anthropic key + version headers stay off this path entirely; the
+  // relay adds them server-side (and enforces model/max_tokens itself).
+  const idToken = PROXY_URL ? await cloudIdToken() : null;
+  const apiKey = idToken ? null : getApiKey();
+  if (!idToken && !apiKey) {
+    throw new Error("No way to call Claude — add an API key in Settings, or sign in to cloud sync to use the shared key.");
+  }
   const body = {
     model: MODEL,
     max_tokens: maxTokens,
@@ -42,14 +70,19 @@ export async function callClaude(userContent, { timeoutMs = 150000, maxTokens = 
     // Promise.race guarantees the timeout fires even if the runtime's fetch
     // implementation ignores AbortController signals.
     const res = await Promise.race([
-      fetch("https://api.anthropic.com/v1/messages", {
+      fetch(idToken ? PROXY_URL : "https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
+        headers: idToken
+          ? {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${idToken}`,
+            }
+          : {
+              "Content-Type": "application/json",
+              "x-api-key": apiKey,
+              "anthropic-version": "2023-06-01",
+              "anthropic-dangerous-direct-browser-access": "true",
+            },
         body: JSON.stringify(body),
         signal: currentAbort.signal,
       }),

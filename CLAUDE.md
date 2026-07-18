@@ -107,7 +107,11 @@ constants), `lib/derive.js` (pure derivations: stats, review queue, siblings,
 annotateThumbs, arrivingCalendar), `hooks/useMediaQuery.js`.
 
 Libraries: `lib/gmail.js` (Gmail REST + all email extraction regexes),
-`lib/anthropic.js` (browser-direct Claude calls, model `claude-sonnet-5`),
+`lib/anthropic.js` (Claude calls, model `claude-sonnet-5` — browser-direct
+with the localStorage key, OR via the relay's `/claude` proxy when
+`VITE_CLAUDE_PROXY_URL` is set and the user is cloud-signed-in; decision
+is per-call by token availability, `claudeVia()` reports the mode, no
+auto-fallback on proxy errors),
 `lib/gis.js` (Google OAuth token client), `lib/firebase.js` (CDN-loaded RTDB
 sync, optional — also owns the `_directory` write and admin-only reads, see
 Key mechanisms), `lib/storage.js` (IndexedDB with localStorage migration),
@@ -116,8 +120,9 @@ Key mechanisms), `lib/storage.js` (IndexedDB with localStorage migration),
 
 Workers: `scripts/carrier-eta.mjs` run by `.github/workflows/carrier-eta.yml`
 (cron every 6h + manual dispatch); `scripts/gmail-sync.mjs` run by
-`.github/workflows/gmail-sync.yml` (cron every 5 min + manual +
-`repository_dispatch type=gmail-sync`; green-skips until its secrets exist) —
+`.github/workflows/gmail-sync.yml` (safety-net cron twice hourly — delivery
+is via `repository_dispatch type=gmail-sync` from the Tier-2 relay, live
+since 2026-07-17 — + manual; green-skips until its secrets exist) —
 the headless incremental sync (see Key mechanisms); `scripts/push.mjs` —
 shared FCM send helper used by both workers; `scripts/gmail-auth.mjs` —
 one-time local loopback helper that mints the Gmail refresh token;
@@ -358,7 +363,19 @@ Full re-sync clears it (every status email re-applies from scratch).
   `applyDiscounts` also has a `base <= 0` catch-all: when there are no listed
   prices AND no usable total (e.g. a split email whose per-sub-order total
   failed to extract), items get `paid: null` + `estimated: true` instead of
-  the old silent, unflagged $0.00.
+  the old silent, unflagged $0.00. Since 2026-07-17 the OPPOSITE gap is
+  closed too (found via a real order: $26.21 shown, $1.99 actually paid,
+  no badge): listed prices present but NO total and NO discount line
+  extracted (`missingChargeEvidence()` in discounts.js) used to fall back
+  to factor≈1 — "assume sticker price" — silently and unflagged; such
+  items are now flagged `estimated` with `discountPct: null` (a missing
+  total is an extraction failure, never evidence of no discount — real
+  Temu receipts always print a total; note `total: 0` IS evidence, that's
+  the free-order case). `flagUnverifiedPrices(orders)` (same file) is the
+  one-time repair for orders stored before the flag existed — run on
+  every app load (idempotent, skips manualEdit, stamps per-order
+  `updatedAt` so the flags win the cloud merge), since Reconcile re-applies
+  status emails but never re-runs pricing.
 - **Analytics: spend-over-time period toggle, per-item ignore, free items
   (`AnalyticsView.jsx` + `lib/derive.js`)**: `spendByPeriod(orders, period,
   ignoredKeys)` buckets ACTIVE ORDERS' charged totals by day/week/month/year
@@ -510,10 +527,20 @@ Full re-sync clears it (every status email re-applies from scratch).
   Audience tab, up to 100) — no code/repo change, purely a console click. Full
   Production verification (to drop the allowlist entirely) is a bigger,
   separate undertaking, not done.
-- **Anthropic API key**: entered in app Settings, lives only in browser
-  localStorage per device, per person. Never in the repo. Already
-  multi-user-safe as-is — no change needed for other people to bring their
-  own key.
+- **Anthropic API key**: two places, never the repo/bundle. (1) App
+  Settings → browser localStorage per device (the original path, now the
+  fallback). (2) Since 2026-07-17, optionally in the `cloud/relay`
+  function's env: the app POSTs vision calls to `/claude` with the user's
+  Firebase ID token; the relay verifies it via Identity Toolkit
+  `accounts:lookup` (using `FIREBASE_API_KEY` = the public web API key),
+  requires the uid in `ALLOWED_UIDS` (unset → 503, fails closed), pins
+  model `claude-sonnet-5` (keep in sync with lib/anthropic.js MODEL),
+  clamps max_tokens ≤4000, caps body ~25 MB. RELAY_TOKEN is NOT accepted
+  on `/claude` (it lives in Pub/Sub/Shippo URLs; shipping it to the
+  browser would leak it). Relay needs `--timeout=180s` (vision calls
+  exceed the 60s gen2 default) and `--update-env-vars` on redeploys
+  (`--set-env-vars` wipes GITHUB_TOKEN/RELAY_TOKEN). Multi-user: uids not
+  in ALLOWED_UIDS get 403 and keep bringing their own keys.
 - **Firebase project `temu-dashboard-962d6`**: RTDB (rules: `auth.uid`
   matching `manifest/$uid`, plus an optional admin carve-out on both
   `manifest/$uid` and `manifest/_directory` keyed on `auth.token.email` — see
