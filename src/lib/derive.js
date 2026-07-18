@@ -215,20 +215,71 @@ export function siblingOrders(orders, order) {
    split orders, where the amount paid is exact (100% of the order total
    belongs to that one item — no split ambiguity) but the pre-discount list
    price was never shown. Not "wrong", just "could be filled in later" —
-   deliberately excluded from the urgent review count. */
+   deliberately excluded from the urgent review count.
+
+   priceAuditOrders is a THIRD, order-level bucket: orders whose stored
+   numbers are structurally self-consistent (no estimated/listedUnknown
+   flags — nothing a null-check can catch) but statistically suspicious. A
+   real case motivated it: a receipt whose pre-discount amount ($26.21) got
+   vision-parsed as the total when $1.99 was actually paid — total = listed
+   sum, 0% discount, no flag anywhere. Since genuinely-undiscounted orders
+   are RARE on Temu (nearly everything has a big cut), every full-price
+   order is worth one human glance: "Try real prices" (fixEstimatedPrices)
+   re-checks it against a status email's priced receipt, or "Looks right"
+   dismisses via the order's `priceVerified` flag. Rows are { order, reason }
+   with reason "inconsistent" (a discount line WAS parsed yet the factor
+   says nobody got a discount — the total contradicts the order's own
+   discount field, near-certain misread) or "no-discount" (merely
+   full-price, the weaker signal). Like listPriceUnknownItems, this bucket
+   is deliberately excluded from the urgent review count. */
 export function reviewQueue(orders) {
   const estimatedItems = [];
   const listPriceUnknownItems = [];
   const emptyOrders = [];
+  const priceAuditOrders = [];
   for (const o of orders) {
     if (!o.items || o.items.length === 0) { emptyOrders.push(o); continue; }
+    let itemFlagged = false;
     annotateThumbs(o.items).forEach((it, itemIdx) => {
       const row = { ...it, orderId: o.id, date: o.date, status: o.status || "ordered", itemIdx };
-      if (it.estimated) estimatedItems.push(row);
-      else if (it.listedUnknown) listPriceUnknownItems.push(row);
+      if (it.estimated) { estimatedItems.push(row); itemFlagged = true; }
+      else if (it.listedUnknown) { listPriceUnknownItems.push(row); itemFlagged = true; }
     });
+    // Items already flagged for review live in the buckets above — auditing
+    // the same order twice would just be noise.
+    if (!itemFlagged) {
+      const reason = priceAuditReason(o);
+      if (reason) priceAuditOrders.push({ order: o, reason });
+    }
   }
-  return { estimatedItems, listPriceUnknownItems, emptyOrders };
+  return { estimatedItems, listPriceUnknownItems, emptyOrders, priceAuditOrders };
+}
+
+/* The price-audit qualification predicate (see reviewQueue header). Returns
+   "inconsistent" | "no-discount" | null. Kept separate so the rules read as
+   one checklist. */
+function priceAuditReason(o) {
+  // manualEdit: the human's numbers outrank the heuristic (same rule as
+  // flagUnverifiedPrices in lib/discounts.js). priceVerified: already
+  // dismissed via "Looks right". Cancelled/returned: nothing was charged
+  // in the end, so a misread total no longer matters.
+  if (o.manualEdit || o.priceVerified) return null;
+  if (!isActiveStatus(o.status || "ordered")) return null;
+  // Free orders (fully coupon/credit-covered, total $0.00) are legitimate —
+  // see applyDiscounts' factor clamp in lib/discounts.js.
+  if (!(o.total > 0)) return null;
+  // "Undiscounted": the stored numbers say the buyer paid ~sticker price.
+  // discountFactor (applyDiscounts / saveEdit) is the direct signal when
+  // present; ≥0.97 rather than ===1 tolerates rounding, and also catches
+  // factors >1 (paid MORE than list — even more suspicious). Orders stored
+  // before the field existed fall back to the equivalent per-item check.
+  const undiscounted = o.discountFactor != null
+    ? o.discountFactor >= 0.97
+    : (o.items || []).every((it) => (it.listed || 0) > 0 && it.paid === it.listed);
+  if (!undiscounted) return null;
+  // A parsed discount line + a no-discount factor can't both be true — the
+  // stored total contradicts the order's own discount field.
+  return o.discount > 0 ? "inconsistent" : "no-discount";
 }
 
 /* ---------- Item ratings ("Rate items" tab) ----------

@@ -358,6 +358,21 @@ export default function MobileShell({ c }) {
             </div>
           )}
           {c.review.estimatedItems.length > 0 && !c.syncing && <FixAllBanner c={c} />}
+          {(c.review.priceAuditOrders?.length || 0) > 0 && (
+            <div className="bg-white border border-stone-200 rounded-xl overflow-hidden">
+              <div className="px-4 py-2.5 text-[12px] font-bold text-stone-700 bg-stone-50 border-b border-stone-100">
+                Price audit ({c.review.priceAuditOrders.length})
+              </div>
+              <div className="px-4 py-2 text-[11.5px] text-stone-500 border-b border-stone-100">
+                Full-price orders are rare on Temu — these may be receipt misreads. <b>Try real prices</b> recovers the real numbers from a status email (~1¢); <b>Looks right</b> dismisses.
+              </div>
+              <div className="divide-y divide-stone-100">
+                {c.review.priceAuditOrders.map(({ order: o, reason }) => (
+                  <PriceAuditRow key={o.id} o={o} reason={reason} c={c} />
+                ))}
+              </div>
+            </div>
+          )}
           <div className="bg-white border border-stone-200 rounded-xl p-4">
             <SettingsPanel c={c} dark={false} />
           </div>
@@ -466,6 +481,47 @@ function UnmatchedStatusRow({ u, c }) {
           <ExternalLink size={10} />
         </a>
       </span>
+    </div>
+  );
+}
+
+/* ================= Needs review: price audit row =================
+   Mobile half of the Price audit bucket (reviewQueue → priceAuditOrders in
+   lib/derive.js — orders stored at full sticker price, statistically likely
+   receipt misreads). Mirrors DesktopShell's ReviewView section; mobile's
+   review surface lives in Settings (same placement pattern as the
+   unmatched-status card and FixAllBanner above), and the narrow width gets
+   a two-line row: thumb/name/total on top, reason chip + actions below. */
+function PriceAuditRow({ o, reason, c }) {
+  const items = annotateThumbs(o.items || []);
+  const first = items[0];
+  return (
+    <div className="px-4 py-2.5">
+      <div className="flex items-center gap-2.5">
+        <CropThumb url={first?.thumbUrl} y={first?.thumbY} rows={first?.thumbRows} idx={first?.thumbIdx} trustY={first?.thumbTrustY} size={38} rounded="rounded-lg" />
+        <div className="min-w-0 flex-1">
+          <div className="text-[12.5px] font-semibold truncate">
+            {first?.name || o.id}{items.length > 1 && <span className="text-stone-400 font-normal"> +{items.length - 1} more</span>}
+          </div>
+          <div className="mono text-[10.5px] text-stone-400">{o.id} · {(o.date || "").slice(0, 10)}</div>
+        </div>
+        <div className="mono text-[13px] font-semibold">{fmt(o.total)}</div>
+      </div>
+      <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+        <span className={`text-[10px] font-semibold rounded-full border px-2 py-0.5 ${reason === "inconsistent" ? "bg-amber-50 border-amber-300 text-amber-700" : "bg-stone-100 border-stone-200 text-stone-500"}`}>
+          {reason === "inconsistent" ? "contradicts its own discount line" : "no discount recorded"}
+        </span>
+        <span className="ml-auto flex items-center gap-3">
+          <button onClick={() => c.fixEstimatedPrices(o.id)} disabled={c.syncing}
+            className="text-xs font-bold text-emerald-600 disabled:opacity-40 whitespace-nowrap">
+            Try real prices
+          </button>
+          <button onClick={() => c.verifyOrderPrice(o.id)} disabled={c.syncing}
+            className="text-xs font-bold text-stone-500 disabled:opacity-40 whitespace-nowrap">
+            Looks right
+          </button>
+        </span>
+      </div>
     </div>
   );
 }

@@ -713,6 +713,29 @@ export default function App() {
     save({ ...cur, orders: cur.orders.filter((x) => x.id !== id) });
   }, [data, save, syncing]);
 
+  /* ----- price audit: "Looks right" dismissal -----
+     The Review queue's Price audit bucket (reviewQueue → priceAuditOrders in
+     lib/derive.js) surfaces orders stored at full sticker price — on Temu
+     that's rare enough to usually mean the vision parse misread the receipt
+     (e.g. the pre-discount amount taken as the total). This is the dismissal
+     half: the user eyeballed the order and its numbers really are right, so
+     flag it `priceVerified` and stop auditing it. Deliberately NOT manualEdit
+     (no numbers were changed — sync/Reconcile should keep treating the order
+     normally), and deliberately cleared by any re-parse: rereadOrder/
+     processOrderEmail build fresh order objects without the flag, so a
+     re-read order gets re-audited — new numbers deserve a new look. */
+  const verifyOrderPrice = useCallback((orderId) => {
+    if (syncing) { pushLog("Can't verify prices while a sync is running.", "warn"); return; }
+    const cur = dataRef.current || data; // dataRef, not the render closure — see save()
+    const orders = cur.orders.map((o) =>
+      o.id === orderId
+        ? { ...o, priceVerified: true, updatedAt: Date.now() } // per-order timestamp for cloud merge (lib/syncMerge.js)
+        : o
+    );
+    save({ ...cur, orders });
+    pushLog(`✓ ${orderId}: prices marked verified — removed from the price audit.`, "ok");
+  }, [data, save, syncing]);
+
   /* ----- open this order's detail page on temu.com in a new tab -----
      Orders synced after the link feature shipped have `orderUrl` stored.
      Older orders fetch their email on demand, extract the link, and cache
@@ -1608,7 +1631,7 @@ export default function App() {
     syncing, sync, cancelSync,
     log, pushLog,
     failedEmails, retryFailedEmails, rereadOrder, testConnection,
-    unmatchedStatus: data.unmatchedStatus || [], importMissingOrder, fixEstimatedPrices, fixAllEstimatedPrices,
+    unmatchedStatus: data.unmatchedStatus || [], importMissingOrder, fixEstimatedPrices, fixAllEstimatedPrices, verifyOrderPrice,
     googleSignedIn, handleGoogleSignIn, handleGoogleSignOut,
     apiKeyInput, setApiKeyInput, saveApiKey,
     thumbSize, updateThumbSize,
