@@ -23,11 +23,30 @@
    secret for the Pub/Sub/Shippo endpoints and is never used here.
    ============================================================ */
 
-import { cloudIdToken } from "./firebase";
-
 const MODEL = "claude-sonnet-5";
 const API_KEY_STORAGE_KEY = "temu-anthropic-key";
-const PROXY_URL = import.meta.env.VITE_CLAUDE_PROXY_URL || "";
+
+/* Proxy plumbing is lazy on BOTH counts — env read inside a function,
+   firebase.js loaded via dynamic import — because scripts/gmail-sync.mjs
+   imports this file from Node (for extractJSON), where import.meta.env
+   doesn't exist and firebase.js (whose module scope reads it) must never
+   load. A top-level `import ... from "./firebase"` took the whole
+   headless sync down with ERR_MODULE_NOT_FOUND. Vite still statically
+   replaces the env expression and bundles the dynamic import, so browser
+   behavior is unchanged. */
+function proxyUrl() {
+  try {
+    return import.meta.env.VITE_CLAUDE_PROXY_URL || "";
+  } catch {
+    return ""; // non-Vite runtime (Node) — proxy mode simply doesn't exist here
+  }
+}
+
+async function proxyIdToken() {
+  if (!proxyUrl()) return null;
+  const { cloudIdToken } = await import("./firebase.js");
+  return await cloudIdToken();
+}
 
 export function getApiKey() {
   return localStorage.getItem(API_KEY_STORAGE_KEY) || "";
@@ -44,7 +63,7 @@ export function setApiKey(key) {
    check needs a live Firebase ID token. Used by Settings + log lines
    only — callClaude re-decides per call. */
 export async function claudeVia() {
-  if (PROXY_URL && (await cloudIdToken())) return "proxy";
+  if (await proxyIdToken()) return "proxy";
   return getApiKey() ? "local-key" : "none";
 }
 
@@ -54,7 +73,7 @@ export async function callClaude(userContent, { timeoutMs = 150000, maxTokens = 
   // Proxy first: relay configured AND signed in → server-held key. The
   // Anthropic key + version headers stay off this path entirely; the
   // relay adds them server-side (and enforces model/max_tokens itself).
-  const idToken = PROXY_URL ? await cloudIdToken() : null;
+  const idToken = await proxyIdToken();
   const apiKey = idToken ? null : getApiKey();
   if (!idToken && !apiKey) {
     throw new Error("No way to call Claude — add an API key in Settings, or sign in to cloud sync to use the shared key.");
@@ -70,7 +89,7 @@ export async function callClaude(userContent, { timeoutMs = 150000, maxTokens = 
     // Promise.race guarantees the timeout fires even if the runtime's fetch
     // implementation ignores AbortController signals.
     const res = await Promise.race([
-      fetch(idToken ? PROXY_URL : "https://api.anthropic.com/v1/messages", {
+      fetch(idToken ? proxyUrl() : "https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: idToken
           ? {
