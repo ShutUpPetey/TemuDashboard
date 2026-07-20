@@ -754,12 +754,13 @@ function ItemsView({ c, filteredItems, th, catFilter, setCatFilter, statusFilter
 /* ================= Needs review ================= */
 
 function ReviewView({ c, goEditOrder }) {
-  const { estimatedItems, emptyOrders, listPriceUnknownItems } = c.review;
-  // listPriceUnknownItems doesn't count toward the urgent "Needs review"
-  // badge (see reviewCount in the parent) — its paid amount is exact, only
-  // the list price is unknown — but it still needs to show/hide this page's
-  // own "All clear" state correctly when it's the only non-empty bucket.
-  const nothing = !estimatedItems.length && !emptyOrders.length && !c.failedEmails.length && !c.unmatchedStatus.length && !listPriceUnknownItems.length;
+  const { estimatedItems, emptyOrders, listPriceUnknownItems, priceAuditOrders } = c.review;
+  // listPriceUnknownItems and priceAuditOrders don't count toward the urgent
+  // "Needs review" badge (see reviewCount in the parent) — the former's paid
+  // amount is exact, the latter is a statistical hunch, not a known problem —
+  // but both still need to show/hide this page's own "All clear" state
+  // correctly when they're the only non-empty buckets.
+  const nothing = !estimatedItems.length && !emptyOrders.length && !c.failedEmails.length && !c.unmatchedStatus.length && !listPriceUnknownItems.length && !priceAuditOrders.length;
   if (nothing) {
     return (
       <div className="text-center py-16 text-stone-400 border-2 border-dashed border-stone-200 rounded-lg bg-white">
@@ -851,6 +852,47 @@ function ReviewView({ c, goEditOrder }) {
                 </button>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {priceAuditOrders.length > 0 && (
+        <div className="bg-white border border-stone-200 rounded-lg overflow-hidden">
+          <PanelHead title={`Price audit (${priceAuditOrders.length})`} />
+          <div className="px-4 py-2 text-[12.5px] text-stone-500 border-b border-stone-100">
+            Full-price orders are rare on Temu — these may be receipt misreads. <b>Try real prices</b> recovers the real numbers from a status email (~1¢); <b>Looks right</b> dismisses.
+          </div>
+          <div className="divide-y divide-stone-100">
+            {priceAuditOrders.map(({ order: o, reason }) => {
+              const its = annotateThumbs(o.items || []);
+              const first = its[0];
+              return (
+                <div key={o.id} className="flex items-center gap-3 px-4 py-2">
+                  <CropThumb url={first?.thumbUrl} y={first?.thumbY} rows={first?.thumbRows} idx={first?.thumbIdx} trustY={first?.thumbTrustY} size={36} onClick={() => first?.thumbUrl && c.setLightbox(first.thumbUrl)} />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13px] font-medium truncate">
+                      {first?.name || o.id}{its.length > 1 && <span className="text-stone-400 font-normal"> +{its.length - 1} more</span>}
+                    </div>
+                    <div className="mono text-[10.5px] text-stone-400">{o.id} · {(o.date || "").slice(0, 10)} · total {fmt(o.total)}</div>
+                  </div>
+                  <span
+                    className={`text-[10.5px] font-semibold rounded-full border px-2 py-0.5 whitespace-nowrap ${reason === "inconsistent" ? "bg-amber-50 border-amber-300 text-amber-700" : "bg-stone-100 border-stone-200 text-stone-500"}`}
+                    title={reason === "inconsistent"
+                      ? "A discount line was parsed from this receipt, yet the stored prices show no discount applied — the total was almost certainly misread."
+                      : "Stored at full sticker price with no discount anywhere — rare enough on Temu to be worth a second look."}>
+                    {reason === "inconsistent" ? "contradicts its own discount line" : "no discount recorded"}
+                  </span>
+                  <button onClick={() => c.fixEstimatedPrices(o.id)} disabled={c.syncing}
+                    className="text-xs font-semibold text-emerald-600 hover:text-emerald-500 whitespace-nowrap disabled:opacity-40">
+                    Try real prices
+                  </button>
+                  <button onClick={() => c.verifyOrderPrice(o.id)} disabled={c.syncing}
+                    className="text-xs font-semibold text-stone-500 hover:text-stone-700 whitespace-nowrap disabled:opacity-40">
+                    Looks right
+                  </button>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

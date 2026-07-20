@@ -152,7 +152,10 @@ intercepted), manifest + icons from `vite.config.js`/`public/`.
 Order: `{ id: "PO-211-…", messageId, date, status: ordered|shipped|delivered|
 cancelled|returned, subtotal, discount, shipping, tax, total, discountFactor,
 items[], images[], orderUrl, eta (email text), tracking: {carrier, number, url},
-manualEdit, updatedAt, statusEmailAt }` — `updatedAt` is a PER-ORDER timestamp
+manualEdit, priceVerified ("Looks right" dismissal from the Review queue's
+Price audit — see Two-tier price review; absent until set, and any re-parse
+builds a fresh order object without it, so a re-read order gets re-audited),
+updatedAt, statusEmailAt }` — `updatedAt` is a PER-ORDER timestamp
 (added whenever that order is mutated: status pass, fixEstimatedPrices, manual
 edit, carrier promotion) used ONLY for cloud sync merge (see Key Mechanisms);
 unrelated to the top-level state's `updatedAt`, and NOT the same thing as
@@ -384,7 +387,20 @@ Full re-sync clears it (every status email re-applies from scratch).
   one-time repair for orders stored before the flag existed — run on
   every app load (idempotent, skips manualEdit, stamps per-order
   `updatedAt` so the flags win the cloud merge), since Reconcile re-applies
-  status emails but never re-runs pricing.
+  status emails but never re-runs pricing. Since 2026-07-18 there is a
+  THIRD, order-level audit tier (`reviewQueue` → `priceAuditOrders`,
+  rendered as "Price audit" in both shells' review surfaces, never counted
+  in the urgent badge): structurally self-consistent orders that STILL look
+  misread because they're stored at full sticker price — rare on Temu — via
+  two heuristics: `discountFactor >= 0.97` (per-item `paid === listed`
+  fallback for pre-field orders) with reason `"inconsistent"` when
+  `discount > 0` (the total contradicts the order's own parsed discount
+  line — the $26.21/$1.99 case) else `"no-discount"`; "Try real prices"
+  (fixEstimatedPrices) verifies, "Looks right" sets the order's
+  `priceVerified` flag (`verifyOrderPrice` in App.jsx, stamps `updatedAt`)
+  to dismiss — a flag any re-read/fix naturally clears, since re-parses
+  build fresh order objects (fixEstimatedPrices carries it via spread but
+  sets manualEdit, which excludes the order from the audit anyway).
 - **Analytics: spend-over-time period toggle, per-item ignore, free items
   (`AnalyticsView.jsx` + `lib/derive.js`)**: `spendByPeriod(orders, period,
   ignoredKeys)` buckets ACTIVE ORDERS' charged totals by day/week/month/year
