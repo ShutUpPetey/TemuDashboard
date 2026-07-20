@@ -183,12 +183,20 @@ export function extractTracking(html) {
   // number is 382615135163", "View details on FedEx 382615135163"). Temu's
   // FedEx emails link through app.temu.com only, so the href scan above
   // never identifies them.
-  const number =
+  let number =
     text.match(/\b(1Z[0-9A-Z]{16})\b/)?.[1] ||                        // UPS
     text.match(/\b(9[2-5]\d{20,25})\b/)?.[1] ||                       // USPS
     text.match(/\bFedEx[^0-9]{0,25}(\d{12,15})\b/i)?.[1] ||           // FedEx
     text.match(/tracking (?:number|no\.?|#)(?:\s+is)?[:\s]*([A-Z0-9]{10,34})/i)?.[1] ||
     null;
+  // USPS IMpb numbers sometimes arrive with the "420 + destination ZIP(+4)"
+  // routing prefix glued on — Temu's DHL eCommerce shipments, where DHL
+  // hauls the package and USPS does the last mile. Strip the prefix so the
+  // number classifies as USPS and the carrier worker polls the POSTAL side:
+  // DHL's tracker calls its USPS handoff "delivered", USPS only reports
+  // Delivered when the package actually arrives.
+  const imp = number && /^420\d{5}(?:\d{4})?(9[2-5]\d{20,25})$/.exec(number);
+  if (imp) number = imp[1];
   if (!carrier && number) {
     carrier = number.startsWith("1Z") ? "UPS" : /^9[2-5]/.test(number) ? "USPS" : /^\d{12,15}$/.test(number) ? "FedEx" : null;
   }

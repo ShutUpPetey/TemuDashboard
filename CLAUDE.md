@@ -279,6 +279,17 @@ Full re-sync clears it (every status email re-applies from scratch).
   (still priceless) split confirmation.
 - **Carrier → status promotion**: an effect in App.jsx auto-flips shipped →
   delivered when carrier data says Delivered.
+- **DHL eCommerce / USPS handoff (2026-07-20)**: some Temu shipments ride
+  DHL eCommerce with a USPS IMpb tracking number prefixed by "420+ZIP(+4)"
+  routing digits (30-34 chars, starts "420"). Unstripped, the number
+  classifies as no known carrier, and any fallback adapter that does track
+  it follows the DHL feed — which dead-ends at "tendered to delivery
+  service provider" (DHL's own site even calls that "delivered") while
+  USPS still has days of last-mile left. `extractTracking` strips the
+  routing prefix so these classify as USPS and Shippo polls the postal
+  side, whose Delivered is the real doorstep event (bare-9261… orders
+  already worked this way). Orders stored before the fix keep the
+  420-form until a Reconcile re-applies their shipped email.
 - **Phone app: PWA + push + headless Gmail sync (2026-07-17)**: three
   coordinated pieces. (1) PWA — vite-plugin-pwa injectManifest with
   `src/sw.js`; the SW is deliberately THIN (shell precache + push handlers,
