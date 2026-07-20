@@ -178,10 +178,16 @@ export function extractTracking(html) {
   else if ((url = find("fedex\\.com"))) carrier = "FedEx";
 
   const text = stripTags(html || "");
+  // FedEx numbers are bare 12-15 digits — too generic to match on their own,
+  // so only trust one within a few words of "FedEx" ("The FedEx tracking
+  // number is 382615135163", "View details on FedEx 382615135163"). Temu's
+  // FedEx emails link through app.temu.com only, so the href scan above
+  // never identifies them.
   const number =
     text.match(/\b(1Z[0-9A-Z]{16})\b/)?.[1] ||                        // UPS
     text.match(/\b(9[2-5]\d{20,25})\b/)?.[1] ||                       // USPS
-    text.match(/tracking (?:number|no\.?|#)[:\s]*([A-Z0-9]{10,34})/i)?.[1] ||
+    text.match(/\bFedEx[^0-9]{0,25}(\d{12,15})\b/i)?.[1] ||           // FedEx
+    text.match(/tracking (?:number|no\.?|#)(?:\s+is)?[:\s]*([A-Z0-9]{10,34})/i)?.[1] ||
     null;
   if (!carrier && number) {
     carrier = number.startsWith("1Z") ? "UPS" : /^9[2-5]/.test(number) ? "USPS" : /^\d{12,15}$/.test(number) ? "FedEx" : null;
@@ -237,6 +243,13 @@ export function extractEta(html) {
   const patterns = [
     new RegExp(`(?:estimated|expected)\\s+(?:delivery|arrival)[^A-Za-z0-9]{0,12}(${DATE_RANGE})`, "i"),
     new RegExp(`(?:arriv\\w+|deliver\\w+)\\s+(?:by|between|on|:)?\\s*(${DATE_RANGE})`, "i"),
+    // "Delivery: 5-10 business days (Jul 18-25)" — FedEx transferred-to-
+    // carrier emails put the window in parens after a business-days count.
+    new RegExp(`deliver\\w*[^()]{0,40}\\((${DATE_RANGE})\\)`, "i"),
+    // Last resort: the "$5.00 credit if delivered after Jul 25" promise is
+    // the closest thing Temu sends to a guaranteed-by date (present even in
+    // shipped emails that carry no delivery window at all).
+    new RegExp(`delivered\\s+after\\s+(${MON}\\s*\\d{1,2})`, "i"),
   ];
   for (const p of patterns) {
     const m = text.match(p);

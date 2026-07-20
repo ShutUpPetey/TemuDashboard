@@ -65,6 +65,15 @@ Open threads:
    email-ETA text, to decide what counts as "overdue" — checked `gmail.js`'s
    extractors to confirm there's nothing better to prefer. If Temu's email
    format ever adds an explicit guarantee date, prefer it ahead of both.
+   PARTIALLY ADDRESSED 2026-07-20: `extractEta` now falls back to the
+   "$5.00 credit if delivered after <date>" promise (the closest thing to a
+   guarantee Temu sends, present even in emails with no delivery window),
+   and reads the "Delivery: 5-10 business days (Jul 18-25)" parenthesized
+   window from transferred-to-carrier emails. Same fix (2026-07-20) taught
+   `extractTracking` FedEx: bare 12-15-digit numbers near the word "FedEx"
+   (Temu's FedEx emails have no fedex.com links and say "tracking number IS
+   <n>", which the generic pattern couldn't cross) — before this, FedEx
+   orders never got tracking/ETA at all, so Shippo never polled them.
 3. Dormant adapters: EasyPost (user's dashboard never showed API keys), direct
    UPS (blocked: needs shipper account w/ scheduled pickups), direct USPS
    (blocked: registration issues), Ship24 (free quota burned), 17TRACK (needs
