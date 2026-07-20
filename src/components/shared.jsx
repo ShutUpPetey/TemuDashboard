@@ -182,7 +182,12 @@ export function carrierInfoFor(carrierMap, order) {
 
 const shortDate = (iso) => {
   if (!iso) return null;
-  const d = new Date(iso);
+  // etaFrom/etaTo are date-only "YYYY-MM-DD" strings (every carrier-eta.mjs
+  // adapter normalizes to iso10/ymd). A bare date string parses as UTC
+  // midnight, which toLocaleDateString renders as the PREVIOUS day in any
+  // timezone behind UTC — parse as local midnight instead (same guard as
+  // ArrivingSoonView's day math).
+  const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(iso) ? iso + "T00:00:00" : iso);
   return isNaN(d) ? null : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 };
 
