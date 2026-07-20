@@ -619,8 +619,13 @@ Full re-sync clears it (every status email re-applies from scratch).
   deployed site or at minimum speak the exact same Firebase contract; and
   no phone-side feature may degrade or remove the desktop/browser path.
 - **User environment**: Windows, PowerShell 5.x — `&&` does NOT work; give
-  commands on separate lines. User runs git pushes themselves (credentials
-  shouldn't pass through the assistant).
+  commands on separate lines.
+- **Git workflow (owner instruction, 2026-07-20)**: the assistant handles the
+  full cycle itself — ALWAYS `git pull` BEFORE making any changes (other
+  sessions/PRs land on origin/main frequently), and commit AND push when the
+  work is done. (Supersedes the earlier "user runs pushes themselves" rule —
+  Matt asked for this after a session edited files against a stale checkout
+  and left the commit unpushed.)
 - Repo name must stay `TemuDashboard` (matches `base` in vite.config.js).
 - `.env` is gitignored; values are public-safe identifiers anyway.
 - Build check: `npm run build` (Vite). No tests exist; verification is
